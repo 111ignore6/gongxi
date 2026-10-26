@@ -79,6 +79,12 @@ def health_matches(health, project_id, data_id):
 def port_is_available(port):
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            # Match uvicorn's POSIX bind semantics: a recently stopped listener
+            # can leave TIME_WAIT connections without another live service.
+            # Windows SO_REUSEADDR permits overlapping listeners, so keep its
+            # exclusive default instead.
+            if os.name != "nt":
+                probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             probe.bind(("127.0.0.1", port))
         return True
     except OSError:

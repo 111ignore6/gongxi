@@ -42,6 +42,20 @@ def get_json(url):
 
 
 class RuntimeAcceptanceTests(unittest.TestCase):
+    @unittest.skipIf(os.name == "nt", "POSIX TIME_WAIT reuse semantics")
+    def test_port_probe_accepts_time_wait_but_rejects_live_listener(self):
+        with socket.socket() as listener:
+            listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            listener.bind(("127.0.0.1", 0))
+            listener.listen()
+            port = listener.getsockname()[1]
+            self.assertFalse(runtime_manager.port_is_available(port))
+            with socket.create_connection(("127.0.0.1", port)) as client:
+                accepted, _ = listener.accept()
+                accepted.close()
+                self.assertEqual(client.recv(1), b"")
+        self.assertTrue(runtime_manager.port_is_available(port))
+
     def test_runtime_prefers_exact_lockfile_when_available(self):
         expected = "requirements-lock.txt" if (ROOT / "requirements-lock.txt").is_file() else "requirements.txt"
         self.assertEqual(runtime_manager.requirements_file().name, expected)
