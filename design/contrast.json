@@ -1,0 +1,30 @@
+[
+  {
+    "label": "正文",
+    "foreground": "#282e28",
+    "background": "#fbfaf7",
+    "contrast": 13.31,
+    "normal_text_AA": true
+  },
+  {
+    "label": "次文字",
+    "foreground": "#62695e",
+    "background": "#fbfaf7",
+    "contrast": 5.44,
+    "normal_text_AA": true
+  },
+  {
+    "label": "主要按钮",
+    "foreground": "#fffaf6",
+    "background": "#98472f",
+    "contrast": 6.18,
+    "normal_text_AA": true
+  },
+  {
+    "label": "确认文字",
+    "foreground": "#4e6443",
+    "background": "#e8ede2",
+    "contrast": 5.47,
+    "normal_text_AA": true
+  }
+]
