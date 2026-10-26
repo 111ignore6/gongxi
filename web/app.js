@@ -1,4 +1,5 @@
 import {renderMarkdown, exportThreadMarkdown, clearMarkdownCache} from './markdown.mjs';
+import {DiscussionScroll} from './scroll.mjs';
 const $ = (s, root = document) => root.querySelector(s);
 const app = $('#app');
 const modal = $('#dialog');
@@ -47,6 +48,7 @@ let toastTimer;
 let composing = false;
 let deferredRender = false;
 let previewing = false;
+const discussionScroll = new DiscussionScroll({getKey: () => state.view === 'discussion' && topic() ? state.topic : null});
 
 async function api(path, options = {}) {
   const headers = {'Content-Type':'application/json', ...(state.token ? {Authorization:`Bearer ${state.token}`} : {}), ...options.headers};
@@ -109,11 +111,13 @@ function restoreUI(snapshot) {
 }
 function render(preserve = false) {
   if(preserve&&composing){deferredRender=true;return;}
+  const reading = discussionScroll.capture();
   const snapshot = preserve ? captureUI() : null;
   if (!state.data) renderGate(); else renderWorkspace();
   if(state.data){const bottom=$('.sidebar-bottom');bottom?.insertAdjacentHTML('afterbegin','<button class="text-button" style="padding:10px" data-action="save-credential">保存我的凭证</button>');}
-  restoreUI(snapshot);
   updatePreview();
+  restoreUI(snapshot);
+  discussionScroll.afterRender(reading);
 }
 function renderGate() {
   let content;
@@ -218,7 +222,7 @@ function navigate(view, topicId='') {
   history.replaceState(null,'',`/?${params}`);
   render();
   if(view==='discussion'&&$('#message-draft'))$('#message-draft').value=getDraft(state.topic);
-  window.scrollTo({top:0,behavior:'instant'});
+  if(view !== 'discussion') window.scrollTo({top:0,behavior:'instant'});
 }
 const draftPrefix=()=>`gongxi.draft.${state.member?.id||'unknown'}.`;
 function draftKey(topicId){return `${draftPrefix()}${topicId}`;}
@@ -341,6 +345,7 @@ async function sync() {
   } finally {polling=false;}
 }
 function expireIdentity(){
+  discussionScroll.reset();
   clearMarkdownCache();previewing=false;
   state.recoveryDraft=formatDrafts(currentDrafts());clearOwnDrafts();
   state.token='';state.member=null;state.data=null;state.results=null;state.mobile=false;state.initialized=true;
@@ -362,10 +367,19 @@ async function submit(form,event) {
       case 'login-form': await authenticate(values.token);break;
       case 'topic-form': {const created=await post('/topics',values);closeDialog();await refresh();navigate('discussion',created.id);toast('议题已创建。');break;}
       case 'message-form': {
-        const signature=JSON.stringify([state.topic,values.body,state.reply]);
+        const sentTopic=state.topic;
+        const signature=JSON.stringify([sentTopic,values.body,state.reply]);
         if(!pendingMessages.has(signature))pendingMessages.set(signature,crypto.randomUUID());
-        const payload={topic_id:state.topic,body:values.body,reply_to:state.reply||undefined,idempotency_key:pendingMessages.get(signature)};
-        await post('/messages',payload);state.reply=null;previewing=false;saveDraft(state.topic,'');const draft=$('#message-draft');if(draft)draft.value='';await refresh(true);pendingMessages.delete(signature);toast('发言已保存，等待其他参与者读取。');break;
+        const payload={topic_id:sentTopic,body:values.body,reply_to:state.reply||undefined,idempotency_key:pendingMessages.get(signature)};
+        await post('/messages',payload);
+        if(getDraft(sentTopic)===values.body)saveDraft(sentTopic,'');
+        if(state.view==='discussion' && state.topic===sentTopic){
+          state.reply=null;previewing=false;
+          const draft=$('#message-draft');if(draft?.value===values.body)draft.value='';
+        }
+        await refresh(true);
+        if(state.view==='discussion' && state.topic===sentTopic)discussionScroll.toLatest({smooth:true});
+        pendingMessages.delete(signature);toast('发言已保存，等待其他参与者读取。');break;
       }
       case 'task-form': await post('/tasks',{...values,topic_id:values.topic_id||undefined});closeDialog();await refresh();toast('任务已添加，尚未自动分配负责人。');break;
       case 'decision-form': await post('/decisions',{...values,topic_id:values.topic_id||undefined});closeDialog();await refresh();toast('决定已记录。');break;
@@ -463,7 +477,7 @@ document.addEventListener('keydown',event=>{
   if((event.ctrlKey||event.metaKey)&&event.key==='Enter'&&event.target.id==='message-draft'){event.preventDefault();$('#message-form')?.requestSubmit();}
 });
 modal.addEventListener('click',event=>{if(event.target===modal){const r=modal.getBoundingClientRect();if(event.clientX<r.left||event.clientX>r.right||event.clientY<r.top||event.clientY>r.bottom)closeDialog();}});
-function logout(){clearMarkdownCache();previewing=false;clearOwnDrafts();state.recoveryDraft='';state.token='';state.member=null;state.data=null;state.error='';state.joining=false;state.joinCode='';state.mobile=false;pendingMessages.clear();pendingEnrollment=null;credentialOrigin=location.origin;try{sessionStorage.removeItem('gongxi.token');sessionStorage.removeItem('gongxi.pending');sessionStorage.removeItem('gongxi.invitation');}catch{}history.replaceState(null,'','/');render();}
+function logout(){discussionScroll.reset();clearMarkdownCache();previewing=false;clearOwnDrafts();state.recoveryDraft='';state.token='';state.member=null;state.data=null;state.error='';state.joining=false;state.joinCode='';state.mobile=false;pendingMessages.clear();pendingEnrollment=null;credentialOrigin=location.origin;try{sessionStorage.removeItem('gongxi.token');sessionStorage.removeItem('gongxi.pending');sessionStorage.removeItem('gongxi.invitation');}catch{}history.replaceState(null,'','/');render();}
 async function start(){
   try{const status=await api('/status');state.initialized=status.initialized;state.error='';if(pendingEnrollment){await recoverEnrollment();return;}if(state.token&&!state.joining){try{await authenticate(state.token);return;}catch(error){if(error.status===401||error.status===403){expireIdentity();return;}state.error=error.message;}}render();}
   catch(error){state.error=error.message;render();}

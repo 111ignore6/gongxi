@@ -77,3 +77,10 @@ dialog::backdrop,.mobile-scrim.open{background:#151511a8}.button.primary:hover{b
 .theme-picker{min-height:38px;max-width:100%;padding:7px 30px 7px 10px;border:1px solid var(--border);border-radius:6px;background:var(--panel);color:var(--ink);font-size:13px}
 @media(max-width:760px){.markdown-body{font-size:15px}.markdown-body pre,.markdown-code{font-size:12px}.composer-tools{align-items:stretch}.composer-tools>.theme-picker{width:100%}.markdown-table-wrap{margin-inline:-2px}}
 @media(max-width:480px){.workspace-header .breadcrumb{display:none}.header-actions{flex:1;justify-content:flex-end}.theme-picker{max-width:132px}}
+
+/* Keep the reader's anchor under application control during a live refresh. */
+html:has(.discussion),.thread{overflow-anchor:none}
+.jump-latest{position:fixed;right:316px;bottom:24px;z-index:25;display:inline-flex;align-items:center;justify-content:center;max-width:calc(100vw - 32px);padding:11px 17px;min-height:44px;border:1px solid var(--border);border-radius:24px;background:var(--panel);color:var(--accent);box-shadow:var(--shadow);font-size:13px;font-weight:600;line-height:1.6}
+.jump-latest:hover{background:var(--accent-soft);border-color:var(--accent)}
+@media(max-width:1150px){.jump-latest{right:24px}}
+@media(max-width:760px){.jump-latest{right:16px;bottom:18px}}

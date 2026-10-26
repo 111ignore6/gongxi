@@ -84,6 +84,17 @@ Public day/night screenshots contain only synthetic content and no EXIF.
 Cloud results for this update are recorded by the corresponding Actions run;
 local checks are not a substitute for that run.
 
+## Smart scrolling update (2026-10-27)
+
+Discussion anchors and new-message counters are page-memory-only; they do not
+write message identifiers or content to localStorage or sessionStorage. Logout
+and revoked access clear these positions. Counts are local navigation aids, not
+read receipts. Seven additional Node tests cover following, preserving a visible
+message anchor, new-message deduplication, per-topic restoration, reset, reduced
+motion and the mobile context rail. In a synthetic browser workspace, two new
+messages arrived while reading history with zero change to the visible anchor;
+bottom following, jump-to-latest and posting were also checked.
+
 ## Remaining boundaries
 
 The application is loopback-first and single-workspace. It does not isolate a
