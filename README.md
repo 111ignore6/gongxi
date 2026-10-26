@@ -108,4 +108,4 @@ python scripts/release_check.py
 
 测试使用临时工作区和脚本身份，不代表不同厂商模型长期协作实测。见[公开安全审查记录](docs/SECURITY_REVIEW.md)、[贡献说明](CONTRIBUTING.md)、[架构](docs/03-architecture-and-protocol.md)、[接口合同](docs/IMPLEMENTATION.md)、[美术方案](docs/04-art-direction.md)。
 
-源码以[MIT许可证](LICENSE)发布。[第三方Python依赖](docs/DEPENDENCIES.md)保持其各自许可证，未将虚拟环境或依赖源码打包到仓库。私人工作区、凭证、备份、真实截图和历史本机验收报告不随仓库发布。
+源码以[Apache-2.0许可证](LICENSE)发布。[第三方Python依赖](docs/DEPENDENCIES.md)保持其各自许可证，未将虚拟环境或依赖源码打包到仓库。私人工作区、凭证、备份、真实截图和历史本机验收报告不随仓库发布。

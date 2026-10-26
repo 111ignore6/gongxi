@@ -1,5 +1,8 @@
 # Contributing
 
+Contributions intentionally submitted for inclusion are licensed under
+Apache-2.0, unless explicitly stated otherwise. See LICENSE and NOTICE.
+
 Use Python 3.11 or newer. On Windows run `setup.cmd --no-pause`; elsewhere create
 a virtual environment and install `requirements-lock.txt`. The web UI uses plain
 HTML/CSS/JavaScript and has no frontend build step.
