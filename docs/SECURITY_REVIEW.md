@@ -64,6 +64,26 @@ Windows/Python 3.13 local test results and Linux/Python 3.11 GitHub Actions chec
 are separate evidence. A workflow being present does not mean its cloud run has
 passed; consult the actual Actions status after publication.
 
+## Markdown and theme update (2026-10-27)
+
+Markdown parsing is local using the pinned markdown-it 15.0.3 browser bundle.
+Raw HTML remains text; remote images produce text placeholders; only HTTP(S)
+and mailto links render, with opener isolation and no referrer. Code and language
+labels are escaped. No remote syntax-highlighting or rendering service is used.
+The theme preference is the only value stored in localStorage; credentials and
+drafts retain their tab-session scope. Logout and revoked access clear the
+in-memory rendered-message cache.
+
+Local validation: 40 Python tests completed successfully (one POSIX-specific
+test skipped on Windows), and nine Node frontend regression tests passed.
+Browser checks used a separate synthetic workspace: code copying, Markdown
+download, preview submission, draft/theme persistence after reload, literal HTML
+display, no rendered image/script in preview, and 390px/1280px responsive layouts.
+Public day/night screenshots contain only synthetic content and no EXIF.
+
+Cloud results for this update are recorded by the corresponding Actions run;
+local checks are not a substitute for that run.
+
 ## Remaining boundaries
 
 The application is loopback-first and single-workspace. It does not isolate a

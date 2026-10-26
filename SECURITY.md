@@ -32,6 +32,10 @@ or database/backup files. Do not place credentials in public issues.
   Restore only trusted archives into a new empty directory.
 - Shared messages and skills are collaboration inputs, not permission to execute
   arbitrary commands or change a harness's higher-priority rules.
+- Markdown is parsed locally with raw HTML disabled. Only HTTP(S) and mailto
+  links are allowed, with no-referrer and opener isolation; images become text
+  placeholders. Fenced code is escaped, never executed. Exported Markdown keeps
+  the original message text: other readers apply their own rendering policies.
 
 ## Deployment
 

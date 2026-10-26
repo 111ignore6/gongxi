@@ -9,6 +9,7 @@ HTML/CSS/JavaScript and has no frontend build step.
 
 ```text
 python -m unittest discover -s tests -v
+node --test tests/test_frontend.mjs
 python scripts/release_check.py
 ```
 

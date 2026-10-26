@@ -27,4 +27,5 @@ jobs:
           cache: pip
       - run: python -m pip install -r requirements-lock.txt
       - run: python -m unittest discover -s tests -v
+      - run: node --test tests/test_frontend.mjs
       - run: python scripts/release_check.py

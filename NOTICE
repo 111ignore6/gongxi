@@ -3,3 +3,7 @@ Copyright 2026 Gongxi contributors
 
 Licensed under the Apache License, Version 2.0.
 See LICENSE for the full license text.
+
+The bundled markdown-it browser distribution and its included components retain
+their own licenses. See web/vendor/markdown-it.LICENSE and
+web/vendor/THIRD-PARTY-LICENSES.txt.

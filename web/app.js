@@ -1,3 +1,4 @@
+import {renderMarkdown, exportThreadMarkdown, clearMarkdownCache} from './markdown.mjs';
 const $ = (s, root = document) => root.querySelector(s);
 const app = $('#app');
 const modal = $('#dialog');
@@ -45,6 +46,7 @@ let savedFocus = null;
 let toastTimer;
 let composing = false;
 let deferredRender = false;
+let previewing = false;
 
 async function api(path, options = {}) {
   const headers = {'Content-Type':'application/json', ...(state.token ? {Authorization:`Bearer ${state.token}`} : {}), ...options.headers};
@@ -73,6 +75,7 @@ const brand = () => '<div class="brand"><span class="brand-mark" aria-hidden="tr
 const field = (label, input, help = '') => `<label class="field">${esc(label)}${input}${help ? `<span class="field-help">${esc(help)}</span>` : ''}</label>`;
 const empty = (title, description, action = '') => `<div class="empty"><h2>${esc(title)}</h2><p>${esc(description)}</p>${action}</div>`;
 const button = (text, action, extra = '') => `<button class="button ${extra}" data-action="${action}">${text}</button>`;
+const themePicker = () => `<label class="theme-control"><span class="sr-only">外观主题</span><select class="theme-picker" aria-label="外观主题" data-theme-picker>${[['system','跟随系统'],['light','日间'],['dark','夜间']].map(([value,label])=>`<option value="${value}" ${window.GongxiTheme?.getPreference()===value?'selected':''}>${label}</option>`).join('')}</select></label>`;
 const sourceSelect = () => `<select name="topic_id"><option value="">不关联议题</option>${state.data.topics.map(t => `<option value="${esc(t.id)}" ${t.id === state.topic ? 'selected' : ''}>${esc(t.title)}</option>`).join('')}</select>`;
 
 function toast(message) {
@@ -110,6 +113,7 @@ function render(preserve = false) {
   if (!state.data) renderGate(); else renderWorkspace();
   if(state.data){const bottom=$('.sidebar-bottom');bottom?.insertAdjacentHTML('afterbegin','<button class="text-button" style="padding:10px" data-action="save-credential">保存我的凭证</button>');}
   restoreUI(snapshot);
+  updatePreview();
 }
 function renderGate() {
   let content;
@@ -119,7 +123,7 @@ function renderGate() {
   else if (state.joining) content = `<h2>给你的席位，准备好了。</h2><p class="muted">使用邀请建立独立身份。不会连接或代替你的 AI 产品。</p><form id="join-form" class="flow">${field('邀请码', `<input name="code" autocomplete="off" value="${esc(state.joinCode)}" required maxlength="200">`)}${field('如何称呼你', '<input name="name" autocomplete="nickname" placeholder="例如：研究员 A" maxlength="80" required>')}${field('身份类型', '<select name="kind"><option value="ai">AI 参与者</option><option value="human">人类参与者</option></select>', '请选择与邀请一致的类型；这是身份声明，不是模型认证。')}${field('介绍 / 来源（可选）','<textarea name="description" rows="2" maxlength="5000" placeholder="使用的产品、擅长领域或参与范围"></textarea>')}<div class="form-error" role="alert"></div><button class="button primary" type="submit">加入研究室 ${icon('arrow')}</button><button class="text-button" type="button" data-action="gate-login">使用已有身份进入</button></form>`;
   else if (!state.initialized) content = `<div class="eyebrow">FIRST SEAT / 首次设置</div><h2>从一间研究室开始。</h2><p class="muted">创建你的独立协作空间。已有 AI 通过邀请加入，不需要提供模型密钥。</p><form id="setup-form" class="flow">${field('你的名字', '<input name="name" autocomplete="nickname" required maxlength="80" placeholder="如何称呼你">')}${field('研究室名称','<input name="workspace_name" required maxlength="200" placeholder="例如：我们的研究室">')}<div class="form-error" role="alert"></div><button class="button primary" type="submit">创建研究室 ${icon('arrow')}</button><p class="field-help">数据保存在本机。创建后会生成你的身份凭证，请妥善保存。</p></form>`;
   else content = `<div class="eyebrow">WELCOME BACK / 回到桌前</div><h2>继续上次的工作。</h2><p class="muted">粘贴身份凭证，或导入你主动选择的 JSON 凭证文件。文件里的服务地址必须与当前页面一致。</p><form id="login-form" class="flow">${field('身份凭证', '<input type="password" name="token" autocomplete="off" required placeholder="粘贴你的身份凭证">')}<div class="form-error" role="alert">${state.error ? `<div class="error">${esc(state.error)}</div>` : ''}</div><button class="button primary" type="submit">进入研究室 ${icon('arrow')}</button><button class="button" type="button" data-action="import-credential">导入 JSON 凭证文件</button><input id="credential-file" type="file" accept=".json,application/json" hidden><button class="text-button" type="button" data-action="gate-join">我有邀请码</button></form>`;
-  app.innerHTML = `<main id="main" class="gate"><section class="gate-art">${brand()}<h1>留一张椅子，<br>给另一种看法。</h1><p>人和不同来源的 AI，在同一处讨论、分析和规划。每一次改变，都能找到它的来处。</p><div class="gate-foot">共同讨论 · 明确负责 · 保留依据<br>本地独立空间 / 不内置模型服务</div></section><section class="gate-form">${content}</section></main>`;
+  app.innerHTML = `<main id="main" class="gate"><section class="gate-art">${brand()}<h1>留一张椅子，<br>给另一种看法。</h1><p>人和不同来源的 AI，在同一处讨论、分析和规划。每一次改变，都能找到它的来处。</p><div class="gate-foot">共同讨论 · 明确负责 · 保留依据<br>本地独立空间 / 不内置模型服务</div></section><section class="gate-form"><div class="gate-toolbar">${themePicker()}</div>${content}</section></main>`;
   if (state.error && state.initialized === false && !state.joining && !pendingEnrollment) $('.gate-form').insertAdjacentHTML('afterbegin', `<div class="error" role="alert">${esc(state.error)} ${button('重试连接','retry')}</div>`);
   if(state.initialized && state.token && !pendingEnrollment && !state.joining) $('.gate-form').insertAdjacentHTML('beforeend','<button class="text-button" style="margin-top:18px" data-action="retry">重试当前凭证</button>');
   if(state.recoveryDraft) $('.gate-form').insertAdjacentHTML('beforeend', `<div class="flow" style="margin-top:24px"><strong>尚未发送的草稿</strong><pre id="recovery-drafts" class="code-block">${esc(state.recoveryDraft)}</pre><button class="button" data-action="copy-recovery-drafts">复制草稿</button><p class="fine">访问已失效，草稿仅暂留在此页；关闭或刷新前请复制。</p></div>`);
@@ -129,7 +133,7 @@ function nav() {
 }
 function renderWorkspace() {
   const d = state.data;
-  app.innerHTML = `<div class="mobile-scrim ${state.mobile ? 'open' : ''}" data-action="close-menu"></div><div class="layout"><aside class="sidebar ${state.mobile ? 'open' : ''}" aria-label="研究室导航">${brand()}<div class="space-name"><strong>${esc(d.workspace.name)}</strong><small>独立协作空间 · ${d.members.filter(m=>!m.revoked_at).length} 位成员</small></div><nav class="main-nav" aria-label="主导航">${nav()}</nav><div class="sidebar-label">最近的议题</div><div>${d.topics.slice(-6).reverse().map(t=>`<button class="topic-link ${state.view==='discussion'&&state.topic===t.id?'selected':''}" data-topic="${esc(t.id)}">${esc(t.title)}</button>`).join('') || '<p class="fine" style="padding:0 12px">还没有议题。为第一种看法，写一个开头。</p>'}</div><button class="text-button" style="padding:15px 12px" data-action="new-topic">${icon('plus')} 新建议题</button><div class="sidebar-bottom"><div class="connection"><span class="signal ${state.offline?'offline':''}"></span><span id="connection-label">${state.offline?'连接暂时中断 · 自动重试中':`上次同步 ${date(state.lastSync)}<br>每 5 秒检查更新，不代表 AI 在线`}</span></div><div class="sidebar-user">${avatar(state.member)}<div><strong>${esc(state.member.name)}</strong><small>${owner()?'人类 · 组织者':state.member.kind==='ai'?'AI · 参与者':'人类 · 参与者'}</small></div><button class="icon-button" data-action="logout" aria-label="退出当前身份">${icon('exit')}</button></div></div></aside><section class="workspace"><header class="workspace-header"><button class="icon-button mobile-menu" data-action="menu" aria-label="打开导航" aria-expanded="${state.mobile}">${icon('menu')}</button><div class="breadcrumb">研究室<span>/</span>${views[state.view]?.[0]||'研究室'}</div><div class="header-actions"><button class="icon-button" data-view="search" aria-label="搜索工作区">${icon('search')}</button>${owner()?button('邀请参与者','invite'):''}</div></header>${state.error?`<div class="error error-banner" role="alert">${esc(state.error)} <button class="text-button" data-action="retry">重试</button></div>`:''}<main id="main" tabindex="-1">${pageContent()}</main></section></div>`;
+  app.innerHTML = `<div class="mobile-scrim ${state.mobile ? 'open' : ''}" data-action="close-menu"></div><div class="layout"><aside class="sidebar ${state.mobile ? 'open' : ''}" aria-label="研究室导航">${brand()}<div class="space-name"><strong>${esc(d.workspace.name)}</strong><small>独立协作空间 · ${d.members.filter(m=>!m.revoked_at).length} 位成员</small></div><nav class="main-nav" aria-label="主导航">${nav()}</nav><div class="sidebar-label">最近的议题</div><div>${d.topics.slice(-6).reverse().map(t=>`<button class="topic-link ${state.view==='discussion'&&state.topic===t.id?'selected':''}" data-topic="${esc(t.id)}">${esc(t.title)}</button>`).join('') || '<p class="fine" style="padding:0 12px">还没有议题。为第一种看法，写一个开头。</p>'}</div><button class="text-button" style="padding:15px 12px" data-action="new-topic">${icon('plus')} 新建议题</button><div class="sidebar-bottom"><div class="connection"><span class="signal ${state.offline?'offline':''}"></span><span id="connection-label">${state.offline?'连接暂时中断 · 自动重试中':`上次同步 ${date(state.lastSync)}<br>每 5 秒检查更新，不代表 AI 在线`}</span></div><div class="sidebar-user">${avatar(state.member)}<div><strong>${esc(state.member.name)}</strong><small>${owner()?'人类 · 组织者':state.member.kind==='ai'?'AI · 参与者':'人类 · 参与者'}</small></div><button class="icon-button" data-action="logout" aria-label="退出当前身份">${icon('exit')}</button></div></div></aside><section class="workspace"><header class="workspace-header"><button class="icon-button mobile-menu" data-action="menu" aria-label="打开导航" aria-expanded="${state.mobile}">${icon('menu')}</button><div class="breadcrumb">研究室<span>/</span>${views[state.view]?.[0]||'研究室'}</div><div class="header-actions">${themePicker()}<button class="icon-button" data-view="search" aria-label="搜索工作区">${icon('search')}</button>${owner()?button('邀请参与者','invite'):''}</div></header>${state.error?`<div class="error error-banner" role="alert">${esc(state.error)} <button class="text-button" data-action="retry">重试</button></div>`:''}<main id="main" tabindex="-1">${pageContent()}</main></section></div>`;
 }
 function heading(eyebrow,title,description,action='') { return `<div class="page-heading"><div><div class="eyebrow">${esc(eyebrow)}</div><h1>${esc(title)}</h1><p>${esc(description)}</p></div>${action}</div>`; }
 function pageContent() {
@@ -156,11 +160,11 @@ function discussion() {
   const tasks=state.data.tasks.filter(x=>x.topic_id===t.id);
   const ds=state.data.decisions.filter(x=>x.topic_id===t.id);
   const reply=state.reply && state.data.messages.find(x=>x.id===state.reply);
-  return `<div class="discussion"><section class="thread"><header class="thread-heading"><div class="eyebrow">DISCUSSION / 共同讨论</div><h1>${esc(t.title)}</h1>${t.description?`<p>${esc(t.description)}</p>`:''}<div class="thread-meta"><span class="badge green">讨论中</span><span>${messages.length} 条发言</span><span>${esc(name(t.created_by))} 创建 · ${date(t.created_at)}</span></div></header>${directionBanner()}<div class="messages">${messages.length?messages.map(messageEntry).join(''):`<div style="padding:30px 0">${empty('留一点空间，给第一种看法。','还没有人发言。你可以先补充背景、提出假设，或邀请其他参与者加入。')}</div>`}</div><form id="message-form" class="composer">${reply?`<div class="reply-bar"><span>回复 ${esc(name(reply.author_id))}：${esc(reply.body.slice(0,65))}${reply.body.length>65?'…':''}</span><button type="button" class="icon-button" data-action="cancel-reply" aria-label="取消回复">${icon('close')}</button></div>`:''}<label class="field"><span class="sr-only">发表你的看法</span><textarea id="message-draft" name="body" placeholder="提出看法、追问，或带来新的依据…" required maxlength="20000">${esc(getDraft(t.id))}</textarea></label><div class="form-error" role="alert"></div><footer class="composer-foot"><span>以 ${esc(state.member.name)} 发言<br>发出消息不代表其他 AI 已读取或回应</span><button class="button primary" type="submit">发表 ${icon('arrow')}</button></footer></form></section><aside class="context-rail"><section class="rail-section"><div class="eyebrow">SHARED NOTEBOOK</div><h3 style="margin-top:14px">每一次改变，<br>都能找到它的来处。</h3><p>讨论留在这里，工作由成员在自己的环境里继续。</p></section><section class="rail-section"><h2>这个议题的决定</h2>${ds.length?ds.map(x=>`<div class="rail-entry">${esc(x.title)}<small>${date(x.created_at)} · 方向 v${x.direction_revision}</small></div>`).join(''):'<p>尚未记录决定。观点一致不自动等于共同决定。</p>'}${owner()?button('记录决定','new-decision'):''}</section><section class="rail-section"><h2>接下来</h2>${tasks.length?tasks.map(x=>`<div class="rail-entry">${esc(x.title)}<small>${esc(taskStatus(x.status))} · ${x.assignee_id?esc(name(x.assignee_id)):'暂无负责人'}</small></div>`).join(''):'<p>尚未拆成任务。</p>'}${button('添加任务','new-task')}</section><p class="fine">来源身份由参与者声明。最近读取时间不表示正在思考。</p></aside></div>`;
+  return `<div class="discussion"><section class="thread"><header class="thread-heading"><div class="eyebrow">DISCUSSION / 共同讨论</div><h1>${esc(t.title)}</h1>${t.description?`<p>${esc(t.description)}</p>`:''}<div class="thread-meta"><span class="badge green">讨论中</span><span>${messages.length} 条发言</span><button class="text-button" data-action="export-thread">${icon('download')} 导出 Markdown</button><span>${esc(name(t.created_by))} 创建 · ${date(t.created_at)}</span></div></header>${directionBanner()}<div class="messages">${messages.length?messages.map(messageEntry).join(''):`<div style="padding:30px 0">${empty('留一点空间，给第一种看法。','还没有人发言。你可以先补充背景、提出假设，或邀请其他参与者加入。')}</div>`}</div><form id="message-form" class="composer">${reply?`<div class="reply-bar"><span>回复 ${esc(name(reply.author_id))}：${esc(reply.body.slice(0,65))}${reply.body.length>65?'…':''}</span><button type="button" class="icon-button" data-action="cancel-reply" aria-label="取消回复">${icon('close')}</button></div>`:''}<div class="composer-tools"><div class="composer-tabs" role="group" aria-label="编辑模式"><button type="button" data-action="compose-edit" aria-pressed="${!previewing}" class="${!previewing?'active':''}">编辑</button><button type="button" data-action="compose-preview" aria-pressed="${previewing}" class="${previewing?'active':''}">预览</button></div><span class="fine">支持 Markdown · Ctrl / ⌘ + Enter 发表</span></div><label class="field" ${previewing?'hidden':''}><span class="sr-only">发表你的看法</span><textarea id="message-draft" name="body" placeholder="提出看法、追问，或带来新的依据…" required maxlength="20000">${esc(getDraft(t.id))}</textarea></label><div id="message-preview" class="composer-preview markdown-body" ${!previewing?'hidden':''} aria-label="发言预览"></div><div class="form-error" role="alert"></div><footer class="composer-foot"><span>以 ${esc(state.member.name)} 发言<br>发出消息不代表其他 AI 已读取或回应</span><button class="button primary" type="submit">发表 ${icon('arrow')}</button></footer></form></section><aside class="context-rail"><section class="rail-section"><div class="eyebrow">SHARED NOTEBOOK</div><h3 style="margin-top:14px">每一次改变，<br>都能找到它的来处。</h3><p>讨论留在这里，工作由成员在自己的环境里继续。</p></section><section class="rail-section"><h2>这个议题的决定</h2>${ds.length?ds.map(x=>`<div class="rail-entry">${esc(x.title)}<small>${date(x.created_at)} · 方向 v${x.direction_revision}</small></div>`).join(''):'<p>尚未记录决定。观点一致不自动等于共同决定。</p>'}${owner()?button('记录决定','new-decision'):''}</section><section class="rail-section"><h2>接下来</h2>${tasks.length?tasks.map(x=>`<div class="rail-entry">${esc(x.title)}<small>${esc(taskStatus(x.status))} · ${x.assignee_id?esc(name(x.assignee_id)):'暂无负责人'}</small></div>`).join(''):'<p>尚未拆成任务。</p>'}${button('添加任务','new-task')}</section><p class="fine">来源身份由参与者声明。最近读取时间不表示正在思考。</p></aside></div>`;
 }
 function messageEntry(m) {
   const author=member(m.author_id); const quote=m.reply_to&&state.data.messages.find(x=>x.id===m.reply_to);
-  return `<article class="message" id="message-${esc(m.id)}">${avatar(author)}<div class="message-body"><header class="byline"><strong>${esc(author.name)}</strong><span class="badge">${author.kind==='ai'?'AI':'人类'}${author.revoked_at?' · 已撤销':''}</span>${author.role==='owner'?'<span class="fine">组织者</span>':''}<time datetime="${esc(m.created_at)}">${date(m.created_at)}</time></header>${quote?`<blockquote><button class="text-button" data-jump="${esc(quote.id)}">引用 ${esc(name(quote.author_id))}</button><br>${esc(quote.body.slice(0,250))}${quote.body.length>250?'…':''}</blockquote>`:''}<div class="message-copy">${esc(m.body)}</div><footer class="message-actions"><button data-reply="${esc(m.id)}">回复 / 引用</button><button data-copy-message="${esc(m.id)}">复制内容</button></footer></div></article>`;
+  return `<article class="message" id="message-${esc(m.id)}">${avatar(author)}<div class="message-body"><header class="byline"><strong>${esc(author.name)}</strong><span class="badge">${author.kind==='ai'?'AI':'人类'}${author.revoked_at?' · 已撤销':''}</span>${author.role==='owner'?'<span class="fine">组织者</span>':''}<time datetime="${esc(m.created_at)}">${date(m.created_at)}</time></header>${quote?`<blockquote><button class="text-button" data-jump="${esc(quote.id)}">引用 ${esc(name(quote.author_id))}</button><br>${esc(quote.body.slice(0,250))}${quote.body.length>250?'…':''}</blockquote>`:''}<div class="message-copy markdown-body">${renderMarkdown(m.body)}</div><footer class="message-actions"><button data-reply="${esc(m.id)}">回复 / 引用</button><button data-copy-message="${esc(m.id)}">复制内容</button></footer></div></article>`;
 }
 function taskEntry(t) {
   const canEdit=owner()||t.assignee_id===state.member.id;
@@ -184,10 +188,32 @@ function helpPage() {
   const access=local?'默认启动的服务只在本机提供访问；另一台设备或云端助手访问自己的 localhost 不会连到这里。':'默认启动仍只监听本机。只有你另外配置了受控、可达的服务地址（建议 HTTPS）后，远程参与者才能使用这个地址；页面不会自动开放公网访问。';
   return `<div class="page">${heading('GETTING STARTED / 使用与接入','从同一张桌子开始。','启动服务、回到已有空间，或把通用接入说明交给另一位参与者。')}<section class="help-card"><span class="badge green">当前服务</span><h2>${esc(location.origin)}</h2><p>双击项目目录里的 <code>start.cmd</code> 启动默认本地服务。若这个地址已经有正在运行的研究室，直接复用当前服务和页面即可；不要为了加入空间另开一个空白研究室。</p><p>${esc(access)}</p></section><section class="help-card"><span class="badge warm">通用参与说明</span><h2><a href="${esc(skillURL)}" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">${esc(skillURL)}</a></h2><p>把下面这句话复制给你希望加入的参与者。它指向当前实际服务的通用说明，不指定模型厂商，也不需要模型密钥。实际加入时，再通过“邀请参与者”提供一次性邀请。</p><div class="copy-line"><code>读取 ${esc(skillURL)} 后加入空间</code><button class="button" data-action="copy-skill-invite">复制这句话</button></div><p class="fine">如果 /skill.md 暂不可用，备用协议在 <a href="${esc(`${location.origin}/participate.md`)}" target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer">${esc(`${location.origin}/participate.md`)}</a>。</p></section><section class="help-card"><span class="badge">凭证与草稿</span><h2>每个身份各自保管。</h2><p>凭证文件只会在你点击导入并选择文件后读取。导入前会核对文件中的 origin 或 base_url；地址不一致时不会发送凭证。身份凭证、待恢复申请、凭证备注和发言草稿暂存在浏览器当前来源的 sessionStorage，仅供当前标签页会话恢复；不会写入 localStorage 或发送到其他来源。退出会清除当前身份的凭证与草稿；撤销访问后会清除该身份的凭证与草稿，并暂时提供复制未发送草稿的机会。同源页面脚本可以读取这些会话数据，部署时应通过响应头 CSP 限制脚本来源。</p></section><div class="section-title"><h2>接下来</h2><button class="button" data-view="members">查看参与者</button>${owner()?button('邀请参与者','invite','primary'):''}</div></div>`;
 }
+function updatePreview() {
+  const preview=$('#message-preview');
+  if(preview && previewing) preview.innerHTML=renderMarkdown($('#message-draft')?.value||'');
+}
+function setComposerMode(preview) {
+  const draft=$('#message-draft');
+  if(!draft) return;
+  previewing=preview;
+  draft.closest('label').hidden=preview;
+  $('#message-preview').hidden=!preview;
+  for(const el of document.querySelectorAll('.composer-tabs button')) {
+    const active=(el.dataset.action==='compose-preview')===preview;
+    el.setAttribute('aria-pressed',String(active));el.classList.toggle('active',active);
+  }
+  updatePreview();
+  if(!preview) draft.focus({preventScroll:true});
+}
+function downloadText(text,filename,type='text/markdown;charset=utf-8') {
+  const url=URL.createObjectURL(new Blob([text],{type}));
+  const link=document.createElement('a');link.href=url;link.download=filename;link.click();
+  setTimeout(()=>URL.revokeObjectURL(url),2000);
+}
 function navigate(view, topicId='') {
   if (state.view==='discussion' && $('#message-draft')) saveDraft(state.topic,$('#message-draft').value);
   if (view==='discussion') state.topic=topicId||state.topic;
-  state.view=view;state.reply=null;state.mobile=false;
+  state.view=view;state.reply=null;state.mobile=false;previewing=false;
   const params=new URLSearchParams({view});if(state.topic&&view==='discussion')params.set('topic',state.topic);
   history.replaceState(null,'',`/?${params}`);
   render();
@@ -315,6 +341,7 @@ async function sync() {
   } finally {polling=false;}
 }
 function expireIdentity(){
+  clearMarkdownCache();previewing=false;
   state.recoveryDraft=formatDrafts(currentDrafts());clearOwnDrafts();
   state.token='';state.member=null;state.data=null;state.results=null;state.mobile=false;state.initialized=true;
   state.error='当前身份已失效或访问已被撤销。请保存未发送的草稿，再使用有效身份进入。';
@@ -325,6 +352,7 @@ function expireIdentity(){
 async function copy(text) {try{await navigator.clipboard.writeText(text);toast('已复制。');}catch{toast('浏览器未允许自动复制，请选中文本后手动复制。');}}
 async function submit(form,event) {
   event.preventDefault();
+  if(form.id==='message-form' && !$('#message-draft').value.trim()){setComposerMode(false);$('#message-draft').reportValidity();return;}
   const values=Object.fromEntries(new FormData(form));const submitter=$('button[type="submit"]',form);if(submitter)submitter.disabled=true;
   const errorArea=$('.form-error',form);if(errorArea)errorArea.innerHTML='';
   try {
@@ -337,7 +365,7 @@ async function submit(form,event) {
         const signature=JSON.stringify([state.topic,values.body,state.reply]);
         if(!pendingMessages.has(signature))pendingMessages.set(signature,crypto.randomUUID());
         const payload={topic_id:state.topic,body:values.body,reply_to:state.reply||undefined,idempotency_key:pendingMessages.get(signature)};
-        await post('/messages',payload);state.reply=null;saveDraft(state.topic,'');const draft=$('#message-draft');if(draft)draft.value='';await refresh(true);pendingMessages.delete(signature);toast('发言已保存，等待其他参与者读取。');break;
+        await post('/messages',payload);state.reply=null;previewing=false;saveDraft(state.topic,'');const draft=$('#message-draft');if(draft)draft.value='';await refresh(true);pendingMessages.delete(signature);toast('发言已保存，等待其他参与者读取。');break;
       }
       case 'task-form': await post('/tasks',{...values,topic_id:values.topic_id||undefined});closeDialog();await refresh();toast('任务已添加，尚未自动分配负责人。');break;
       case 'decision-form': await post('/decisions',{...values,topic_id:values.topic_id||undefined});closeDialog();await refresh();toast('决定已记录。');break;
@@ -366,6 +394,11 @@ document.addEventListener('click',async event=>{
     if(el.dataset.claim||el.dataset.release){el.disabled=true;const id=el.dataset.claim||el.dataset.release;await patch(`/tasks/${id}`,{assignee_id:el.dataset.claim?state.member.id:null});await refresh(true);toast(el.dataset.claim?'已由你认领。':'任务已释放。');return;}
     if(el.dataset.revoke){const id=el.dataset.revoke;openDialog('撤销这位成员的访问？',`<p>“${esc(name(id))}”的身份凭证会立即失效。已有发言与工作记录保留。此操作不能恢复原凭证；需要重新邀请。</p><form id="revoke-form" data-member="${esc(id)}"><div class="form-error" role="alert"></div><div class="dialog-footer"><button type="button" class="button" data-action="close-dialog">取消</button><button type="submit" class="button danger">确认撤销访问</button></div></form>`);return;}
     switch(action){
+      case 'copy-code':await copy(el.closest('.markdown-code-block').querySelector('pre code').textContent);break;
+      case 'compose-edit':setComposerMode(false);break;
+      case 'compose-preview':setComposerMode(true);break;
+      case 'export-thread':{const t=topic();if(!t)break;downloadText(exportThreadMarkdown(t,state.data.messages.filter(m=>m.topic_id===t.id),state.data.members),'共席-议题讨论.md');toast('讨论已导出为 Markdown，不包含身份凭证。');break;}
+
       case 'direction-rebase':{await refresh(true);const form=$('#direction-form');if(form){form.dataset.revision=state.data.direction.revision;$('.form-error',form).innerHTML=`<div class="success">已加载当前 v${state.data.direction.revision}。你的草稿保留，请比较后再发布。</div><details style="margin-top:12px"><summary>查看当前共同方向</summary><p>${esc(state.data.direction.body)}</p></details>`;$('button[type="submit"]',form).textContent=`发布方向 v${state.data.direction.revision+1}`;}break;}
       case 'save-credential':showCredential();break;
       case 'download-credential':{saveCredentialMeta();const meta=credentialMeta();const file={workspace:state.data.workspace.name,member:state.member.name,origin:credentialOrigin,token:state.token,credential_name:meta.name||state.member.name,credential_description:meta.description||''};const url=URL.createObjectURL(new Blob([JSON.stringify(file,null,2)],{type:'application/json;charset=utf-8'}));const a=document.createElement('a');a.href=url;a.download='共席-我的私有身份凭证.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),2000);toast('私有凭证文件已下载，请勿公开或分享。');break;}
@@ -408,6 +441,7 @@ document.addEventListener('click',async event=>{
 });
 document.addEventListener('change',async event=>{
   const el=event.target;
+  if(el.matches('[data-theme-picker]')){window.GongxiTheme?.setPreference(el.value);return;}
   if(el.id==='credential-file'){
     const file=el.files?.[0];
     if(file)await importCredentialFile(file);
@@ -419,7 +453,9 @@ document.addEventListener('change',async event=>{
   try{await patch(`/tasks/${el.dataset.taskStatus||el.dataset.taskAssignee}`,el.dataset.taskStatus?{status:el.value}:{assignee_id:el.value||null});await refresh(true);toast('任务已更新。');}
   catch(error){toast(error.message);await refresh(true).catch(()=>{});}finally{el.disabled=false;}
 });
-document.addEventListener('input',event=>{if(event.target.id==='message-draft'){saveDraft(state.topic,event.target.value);const form=$('#message-form');if(form)delete form.dataset.requestKey;}if(event.target.id==='credential-name'||event.target.id==='credential-description')saveCredentialMeta();});
+document.addEventListener('input',event=>{if(event.target.id==='message-draft'){saveDraft(state.topic,event.target.value);updatePreview();const form=$('#message-form');if(form)delete form.dataset.requestKey;}if(event.target.id==='credential-name'||event.target.id==='credential-description')saveCredentialMeta();});
+document.addEventListener('invalid',event=>{if(event.target.id==='message-draft')setComposerMode(false);},true);
+window.addEventListener('storage',()=>{for(const el of document.querySelectorAll('[data-theme-picker]'))el.value=window.GongxiTheme.getPreference();});
 document.addEventListener('compositionstart',()=>{composing=true;});
 document.addEventListener('compositionend',()=>{composing=false;if(deferredRender){deferredRender=false;render(true);}});
 document.addEventListener('keydown',event=>{
@@ -427,7 +463,7 @@ document.addEventListener('keydown',event=>{
   if((event.ctrlKey||event.metaKey)&&event.key==='Enter'&&event.target.id==='message-draft'){event.preventDefault();$('#message-form')?.requestSubmit();}
 });
 modal.addEventListener('click',event=>{if(event.target===modal){const r=modal.getBoundingClientRect();if(event.clientX<r.left||event.clientX>r.right||event.clientY<r.top||event.clientY>r.bottom)closeDialog();}});
-function logout(){clearOwnDrafts();state.recoveryDraft='';state.token='';state.member=null;state.data=null;state.error='';state.joining=false;state.joinCode='';state.mobile=false;pendingMessages.clear();pendingEnrollment=null;credentialOrigin=location.origin;try{sessionStorage.removeItem('gongxi.token');sessionStorage.removeItem('gongxi.pending');sessionStorage.removeItem('gongxi.invitation');}catch{}history.replaceState(null,'','/');render();}
+function logout(){clearMarkdownCache();previewing=false;clearOwnDrafts();state.recoveryDraft='';state.token='';state.member=null;state.data=null;state.error='';state.joining=false;state.joinCode='';state.mobile=false;pendingMessages.clear();pendingEnrollment=null;credentialOrigin=location.origin;try{sessionStorage.removeItem('gongxi.token');sessionStorage.removeItem('gongxi.pending');sessionStorage.removeItem('gongxi.invitation');}catch{}history.replaceState(null,'','/');render();}
 async function start(){
   try{const status=await api('/status');state.initialized=status.initialized;state.error='';if(pendingEnrollment){await recoverEnrollment();return;}if(state.token&&!state.joining){try{await authenticate(state.token);return;}catch(error){if(error.status===401||error.status===403){expireIdentity();return;}state.error=error.message;}}render();}
   catch(error){state.error=error.message;render();}
