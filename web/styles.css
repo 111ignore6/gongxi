@@ -84,3 +84,9 @@ html:has(.discussion),.thread{overflow-anchor:none}
 .jump-latest:hover{background:var(--accent-soft);border-color:var(--accent)}
 @media(max-width:1150px){.jump-latest{right:24px}}
 @media(max-width:760px){.jump-latest{right:16px;bottom:18px}}
+
+.revoked-members{margin-top:28px;padding:17px 20px}
+.revoked-members summary{color:var(--muted)}
+.revoked-count{display:inline-flex;justify-content:center;min-width:23px;margin-left:6px;padding:1px 6px;border-radius:12px;background:var(--soft-panel);font-size:12px}
+.revoked-members>p{margin:12px 0 18px}
+.revoked-cards{margin-top:18px}
