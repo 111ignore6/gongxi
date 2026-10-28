@@ -106,3 +106,7 @@ html:has(.discussion),.thread{overflow-anchor:none}
 .topic-unread{float:right;min-width:18px;height:18px;border-radius:9px;background:var(--accent);color:#fffaf6;font:11px/18px var(--sans);text-align:center;padding:0 5px;margin-left:6px}
 :root[data-theme="dark"] .topic-unread{color:#201f1b}
 @media(max-width:760px){.breadcrumb{display:none}.header-actions{gap:6px}}
+
+/* Search hits get a short-lived highlight so a long thread is scannable. */
+mark.search-hit{background:#ffe6a1;color:inherit;border-radius:3px;padding:0 2px}
+:root[data-theme="dark"] mark.search-hit{background:#5a4a1d;color:var(--ink)}
