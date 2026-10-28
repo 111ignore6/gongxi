@@ -247,7 +247,7 @@ def create_app(data_dir=None):
             fail(409, "工作区尚未创建")
         return json.loads(row[0])
 
-    def member(request: Request, db=Depends(database)):
+    def member(request: Request, db=Depends(database, scope="function")):
         auth = request.headers.get("authorization", "")
         scheme, _, token = auth.partition(" ")
         if scheme.lower() != "bearer" or not token or len(token) > 512:
@@ -262,7 +262,7 @@ def create_app(data_dir=None):
         db.execute("UPDATE members SET data=? WHERE id=?", (json.dumps(result), result["id"]))
         return result
 
-    def owner(actor=Depends(member)):
+    def owner(actor=Depends(member, scope="function")):
         if actor["role"] != "owner":
             fail(403, "仅组织者可以执行此操作")
         return actor
@@ -396,11 +396,11 @@ def create_app(data_dir=None):
         return {"ok": True}
 
     @app.get("/api/status")
-    def status(db=Depends(database)):
+    def status(db=Depends(database, scope="function")):
         return {"initialized": db.execute("SELECT COUNT(*) FROM workspace").fetchone()[0] > 0}
 
     @app.post("/api/setup")
-    def setup(body: Setup, db=Depends(database)):
+    def setup(body: Setup, db=Depends(database, scope="function")):
         if db.execute("SELECT COUNT(*) FROM workspace").fetchone()[0]:
             fail(409, "工作区已创建")
         value = dict(id=uid(), name=body.workspace_name, created_at=now())
@@ -409,7 +409,7 @@ def create_app(data_dir=None):
         return {"token": token, "member": who, "workspace": value}
 
     @app.post("/api/join")
-    def join(body: Join, db=Depends(database)):
+    def join(body: Join, db=Depends(database, scope="function")):
         value = workspace(db)
         row = db.execute("SELECT * FROM invites WHERE code_hash=?", (digest(body.code),)).fetchone()
         if not row or row["used_at"] or row["expires_at"] <= now():
@@ -421,16 +421,16 @@ def create_app(data_dir=None):
         return {"token": token, "member": who, "workspace": value}
 
     @app.get("/api/me")
-    def me(actor=Depends(member), db=Depends(database)):
+    def me(actor=Depends(member, scope="function"), db=Depends(database, scope="function")):
         return {"member": actor, "workspace": workspace(db)}
 
     @app.get("/api/state")
-    def read_state(include_messages: bool = True, actor=Depends(member), db=Depends(database)):
+    def read_state(include_messages: bool = True, actor=Depends(member, scope="function"), db=Depends(database, scope="function")):
         return state(db, actor=actor, include_messages=include_messages)
 
     @app.get("/api/topics/{ident}/messages")
     def topic_messages(ident: str, before: int | None = Query(None, ge=1, le=9223372036854775807),
-                       limit: int = Query(50, ge=1, le=100), actor=Depends(member), db=Depends(database)):
+                       limit: int = Query(50, ge=1, le=100), actor=Depends(member, scope="function"), db=Depends(database, scope="function")):
         get(db, "topic", ident)
         rows = list(db.execute(
             "SELECT rowid,data FROM entities WHERE kind='message' AND json_extract(data,'$.topic_id')=? "
@@ -448,7 +448,7 @@ def create_app(data_dir=None):
         }
 
     @app.post("/api/read-state")
-    def update_read_state(body: ReadState, actor=Depends(member), db=Depends(database)):
+    def update_read_state(body: ReadState, actor=Depends(member, scope="function"), db=Depends(database, scope="function")):
         check_topic(db, body.topic_id)
         message_value = get(db, "message", body.message_id)
         if message_value["topic_id"] != body.topic_id:
@@ -479,14 +479,14 @@ def create_app(data_dir=None):
                 "read_at": timestamp}
 
     @app.post("/api/invites")
-    def invite(body: Invite, actor=Depends(owner), db=Depends(database)):
+    def invite(body: Invite, actor=Depends(owner, scope="function"), db=Depends(database, scope="function")):
         code = secrets.token_urlsafe(32)
         expires = (datetime.now(timezone.utc) + timedelta(hours=body.expires_hours)).isoformat()
         db.execute("INSERT INTO invites VALUES(?,?,?,NULL)", (digest(code), body.kind, expires))
         return {"code": code, "expires_at": expires, "join_url": "/join?code=" + code}
 
     @app.post("/api/members/{ident}/revoke")
-    def revoke(ident: str, body: Empty, actor=Depends(owner), db=Depends(database)):
+    def revoke(ident: str, body: Empty, actor=Depends(owner, scope="function"), db=Depends(database, scope="function")):
         if ident == actor["id"]:
             fail(409, "不能撤销自己")
         row = db.execute("SELECT data FROM members WHERE id=?", (ident,)).fetchone()
@@ -500,7 +500,7 @@ def create_app(data_dir=None):
         return {"ok": True}
 
     @app.get("/api/events")
-    def events(after: int = Query(0, ge=0, le=9223372036854775807), limit: int = Query(100, ge=1, le=500), actor=Depends(member), db=Depends(database)):
+    def events(after: int = Query(0, ge=0, le=9223372036854775807), limit: int = Query(100, ge=1, le=500), actor=Depends(member, scope="function"), db=Depends(database, scope="function")):
         rows = [dict(r) for r in db.execute("SELECT * FROM events WHERE id>? ORDER BY id LIMIT ?", (after, limit + 1))]
         more = len(rows) > limit
         rows = rows[:limit]
@@ -539,13 +539,13 @@ def create_app(data_dir=None):
         return {"events": visible_rows, "cursor": cursor, "has_more": more}
 
     @app.post("/api/topics")
-    def topic(body: Topic, actor=Depends(member), db=Depends(database)):
+    def topic(body: Topic, actor=Depends(member, scope="function"), db=Depends(database, scope="function")):
         value = put(db, "topic", dict(id=uid(), **body.model_dump(), created_by=actor["id"], created_at=now(), archived=False))
         event(db, "topic.created", value["id"], actor["id"])
         return value
 
     @app.post("/api/messages")
-    def message(body: Message, actor=Depends(member), db=Depends(database)):
+    def message(body: Message, actor=Depends(member, scope="function"), db=Depends(database, scope="function")):
         targets = sorted(body.action_for)
         if len(targets) != len(set(targets)):
             fail(422, "action_for 不能包含重复成员")
@@ -586,7 +586,7 @@ def create_app(data_dir=None):
 
     @app.patch("/api/messages/{ident}/action-state")
     def update_message_action_state(ident: str, body: MessageActionState,
-                                    actor=Depends(member), db=Depends(database)):
+                                    actor=Depends(member, scope="function"), db=Depends(database, scope="function")):
         message_value = get(db, "message", ident)
         if actor["id"] not in message_value.get("action_for", []):
             fail(403, "只有被指派的成员可以更新此处理状态")
@@ -606,7 +606,7 @@ def create_app(data_dir=None):
                 "status": body.status, "updated_at": timestamp}
 
     @app.post("/api/tasks")
-    def task(body: Task, actor=Depends(member), db=Depends(database)):
+    def task(body: Task, actor=Depends(member, scope="function"), db=Depends(database, scope="function")):
         check_topic(db, body.topic_id)
         timestamp = now()
         value = put(db, "task", dict(id=uid(), **body.model_dump(), status="open", assignee_id=None, created_by=actor["id"], created_at=timestamp, updated_at=timestamp))
@@ -614,7 +614,7 @@ def create_app(data_dir=None):
         return value
 
     @app.patch("/api/tasks/{ident}")
-    def patch_task(ident: str, body: TaskPatch, actor=Depends(member), db=Depends(database)):
+    def patch_task(ident: str, body: TaskPatch, actor=Depends(member, scope="function"), db=Depends(database, scope="function")):
         value = get(db, "task", ident)
         changes = body.model_dump(exclude_unset=True, exclude={"expected_updated_at"})
         if not changes or ("status" in changes and changes["status"] is None):
@@ -641,14 +641,14 @@ def create_app(data_dir=None):
         return value
 
     @app.post("/api/decisions")
-    def decision(body: Decision, actor=Depends(owner), db=Depends(database)):
+    def decision(body: Decision, actor=Depends(owner, scope="function"), db=Depends(database, scope="function")):
         check_topic(db, body.topic_id)
         value = put(db, "decision", dict(id=uid(), **body.model_dump(), created_by=actor["id"], created_at=now(), direction_revision=direction(db)["revision"]))
         event(db, "decision.created", value["id"], actor["id"])
         return value
 
     @app.post("/api/direction")
-    def set_direction(body: Direction, actor=Depends(owner), db=Depends(database)):
+    def set_direction(body: Direction, actor=Depends(owner, scope="function"), db=Depends(database, scope="function")):
         current = direction(db)
         if current["revision"] != body.expected_revision:
             fail(409, "方向已变更，请刷新后重试")
@@ -658,7 +658,7 @@ def create_app(data_dir=None):
         return value
 
     @app.post("/api/direction/ack")
-    def acknowledge(body: Ack, actor=Depends(member), db=Depends(database)):
+    def acknowledge(body: Ack, actor=Depends(member, scope="function"), db=Depends(database, scope="function")):
         if body.revision != direction(db)["revision"]:
             fail(409, "只能确认当前方向")
         if body.revision == 0:
@@ -672,7 +672,7 @@ def create_app(data_dir=None):
         return value
 
     @app.get("/api/search")
-    def search(q: str = Query(min_length=1, max_length=200), actor=Depends(member), db=Depends(database)):
+    def search(q: str = Query(min_length=1, max_length=200), actor=Depends(member, scope="function"), db=Depends(database, scope="function")):
         escaped = q.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
         if not escaped:
             fail(422, "搜索内容不能为空")
@@ -683,7 +683,7 @@ def create_app(data_dir=None):
         return result
 
     @app.get("/api/export")
-    def export(actor=Depends(owner), db=Depends(database)):
+    def export(actor=Depends(owner, scope="function"), db=Depends(database, scope="function")):
         value = state(db, actor=actor)
         value["direction_history"] = [json.loads(r[0]) for r in db.execute("SELECT data FROM directions ORDER BY revision")]
         value["exported_at"] = now()

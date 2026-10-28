@@ -4,6 +4,7 @@ import http.server
 import hashlib
 import io
 import os
+from contextlib import closing
 from pathlib import Path
 import secrets
 import socket
@@ -348,6 +349,13 @@ class OperationsAcceptance(unittest.TestCase):
         message = self.request(self.base, 'POST', '/api/messages', {'topic_id': topic['id'], 'body': 'member message to preserve'}, token=member_token)[1]
         task = self.request(self.base, 'POST', '/api/tasks', {'topic_id': topic['id'], 'title': 'continue work', 'description': 'resume after restore'}, token=member_token)[1]
         direction = self.request(self.base, 'POST', '/api/direction', {'body': 'restore history and continue', 'expected_revision': 0}, token=owner_token)[1]
+
+        # A successful write response must not precede its transaction commit;
+        # an immediate online backup must include this final direction update.
+        with closing(sqlite3.connect(self.data / backup_module.DB_NAME)) as snapshot:
+            direction_row = snapshot.execute('SELECT data FROM directions ORDER BY revision DESC LIMIT 1').fetchone()
+        self.assertIsNotNone(direction_row)
+        self.assertEqual(json.loads(direction_row[0]), direction)
 
         archive = self.temp_path / 'full-backup.zip'
         created = self.backup_cli('create', '--data-dir', self.data, '--output', archive)
