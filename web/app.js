@@ -49,7 +49,7 @@ let toastTimer;
 let composing = false;
 let deferredRender = false;
 let previewing = false;
-const discussionScroll = new DiscussionScroll({getKey: () => state.view === 'discussion' && topic() ? state.topic : null});
+const discussionScroll = new DiscussionScroll({getKey: () => state.view === 'discussion' && topic() ? state.topic : null, getScroller: () => document.getElementById('main') || window});
 
 async function api(path, options = {}) {
   const headers = {'Content-Type':'application/json', ...(state.token ? {Authorization:`Bearer ${state.token}`} : {}), ...options.headers};
@@ -142,6 +142,7 @@ function nav() {
 let shell = null;
 let directionOpen = false;
 let discussionView = null;
+let drawerOpen = false;
 const messageNodes = new Map();
 const unreadByTopic = new Map();
 let lastTopicCounts = new Map();
@@ -164,38 +165,70 @@ function updateUnread(d) {
 function resetRegions(){ shell = null; discussionView = null; messageNodes.clear(); }
 
 function shellHTML() {
-  return `<div class="mobile-scrim ${state.mobile ? 'open' : ''}" data-action="close-menu"></div><div class="layout"><aside class="sidebar ${state.mobile ? 'open' : ''}" aria-label="研究室导航">${brand()}<div class="space-name" id="space-name"></div><nav class="main-nav" aria-label="主导航" id="main-nav"></nav><div class="sidebar-label">最近的议题</div><div id="topic-list"></div><button class="text-button" style="padding:15px 12px" data-action="new-topic">${icon('plus')} 新建议题</button><div class="sidebar-bottom"><button class="text-button" style="padding:10px" data-action="save-credential">保存我的凭证</button><div class="connection"><span class="signal"></span><span id="connection-label"></span></div><div class="sidebar-user" id="sidebar-user"></div></div></aside><section class="workspace"><header class="workspace-header"><button class="icon-button mobile-menu" data-action="menu" aria-label="打开导航" aria-expanded="${state.mobile}">${icon('menu')}</button><div class="breadcrumb" id="breadcrumb"></div><div class="header-actions">${themePicker()}<button class="icon-button" data-view="search" aria-label="搜索工作区">${icon('search')}</button>${owner()?button('邀请参与者','invite'):''}</div></header><div id="error-slot"></div><div id="action-error"></div><main id="main" tabindex="-1"></main></section></div>`;
+  return `<div class="docshell">
+    <header class="topbar">${brand()}<div class="workspace-line"><b id="space-name"></b></div><div class="tools">${themePicker()}<button class="icon-button" data-view="search" aria-label="搜索工作区">${icon('search')}</button><button class="icon-button" data-action="drawer-open" aria-label="打开索引">${icon('menu')}</button>${owner()?button('邀请参与者','invite'):''}</div></header>
+    <div id="error-slot"></div><div id="action-error"></div>
+    <nav class="topicstrip" id="topic-strip" aria-label="议题与视图"></nav>
+    <div class="docbody"><aside class="docindex" id="doc-index" aria-label="研究室导航"></aside><main id="main" tabindex="-1"></main></div>
+    <div class="drawer" id="drawer"></div>
+    <div class="drawer-panel" id="drawer-panel"></div>
+  </div>`;
 }
 
 function mountShell() {
   if (shell && app.contains(shell.main)) return;
   app.innerHTML = shellHTML();
+  window.scrollTo(0, 0);
   shell = {
-    scrim: $('.mobile-scrim', app),
-    sidebar: $('.sidebar', app),
     spaceName: $('#space-name', app),
-    nav: $('#main-nav', app),
-    topicList: $('#topic-list', app),
-    connection: $('#connection-label', app),
-    signal: $('.signal', app),
-    user: $('#sidebar-user', app),
-    breadcrumb: $('#breadcrumb', app),
+    strip: $('#topic-strip', app),
+    index: $('#doc-index', app),
+    drawer: $('#drawer', app),
+    drawerPanel: $('#drawer-panel', app),
     errorSlot: $('#error-slot', app),
-    main: $('#main', app),
-    menuButton: $('.mobile-menu', app)
+    main: $('#main', app)
   };
   discussionView = null;
   messageNodes.clear();
 }
 
-function shellTopicListHTML(d) {
-  const items = d.topics.slice(-6).reverse().map(t => {
+function indexHTML(d) {
+  const topics = d.topics.map((t, i) => {
     const n = unreadByTopic.get(t.id) || 0;
     const selected = state.view === 'discussion' && state.topic === t.id;
-    return `<button class="topic-link ${selected?'selected':''}" data-topic="${esc(t.id)}">${esc(t.title)}${n?`<span class="topic-unread" aria-label="${n} 条未读">${n}</span>`:''}</button>`;
+    return `<button class="idx-item ${selected?'on':''}" data-topic="${esc(t.id)}"><i>${String(i+1).padStart(3,'0')}</i><span>${esc(t.title)}</span>${n?`<span class="topic-unread" aria-label="${n} 条未读">${n}</span>`:''}</button>`;
   }).join('');
-  const all = '<button class="text-button" style="padding:10px 12px" data-action="all-topics">全部议题 →</button>';
-  return (items || '<p class="fine" style="padding:0 12px">还没有议题。为第一种看法，写一个开头。</p>') + all;
+  const work = [['overview','研究室总览'],['plan','共同计划'],['decisions','决定记录'],['members','参与者'],['help','使用与接入']].map(([key,label]) => `<button class="idx-item ${state.view===key?'on':''}" data-view="${key}" ${state.view===key?'aria-current="page"':''}><i>—</i><span>${label}</span></button>`).join('');
+  return `<h2>议题</h2>${topics || '<p class="fine" style="padding:6px">还没有议题。</p>'}
+    <button class="text-button" style="padding:8px 6px" data-action="new-topic">${icon('plus')} 新建议题</button>
+    <button class="text-button" style="padding:6px" data-action="all-topics">全部议题 →</button>
+    <h2>工作</h2>${work}
+    <div class="idx-foot"><div class="connection"><span class="signal"></span><span id="connection-label"></span></div>
+      <div class="idx-user" id="sidebar-user"></div></div>`;
+}
+
+function stripHTML(d) {
+  const topics = d.topics.map((t, i) => {
+    const n = unreadByTopic.get(t.id) || 0;
+    const selected = state.view === 'discussion' && state.topic === t.id;
+    return `<button class="${selected?'on':''}" data-topic="${esc(t.id)}"><span class="no">${String(i+1).padStart(3,'0')}</span>${esc(t.title)}${n?` (${n})`:''}</button>`;
+  }).join('');
+  const work = [['overview','研究室'],['plan','计划'],['decisions','决定'],['members','参与者'],['help','接入']].map(([key,label]) => `<button class="${state.view===key?'on':''}" data-view="${key}">${label}</button>`).join('');
+  return topics + '<span class="sep"></span>' + work;
+}
+
+function drawerHTML(d) {
+  const openTasks = d.tasks.filter(t => t.status !== 'done').length;
+  const active = d.members.filter(m => !m.revoked_at).length;
+  return `<span>任务 <b>${openTasks}</b></span><span>决定 <b>${d.decisions.length}</b></span><span>参与者 <b>${active}</b></span><span>上次同步 <b>${date(state.lastSync)}</b></span>
+    <button class="drawer-toggle" data-action="drawer-toggle" aria-expanded="${drawerOpen}" aria-controls="drawer-panel">${drawerOpen?'收起索引 ↓':'展开索引 ↑'}</button>`;
+}
+
+function drawerPanelHTML(d) {
+  const tasks = d.tasks.length ? d.tasks.map(t => `<div class="rowline">· ${esc(t.title)} <small>${esc(taskStatus(t.status))}${t.assignee_id?' · '+esc(name(t.assignee_id)):''}</small></div>`).join('') : '<div class="rowline">暂无任务</div>';
+  const ds = d.decisions.length ? d.decisions.slice(-3).map(x => `<div class="rowline">· ${esc(x.title)}</div>`).join('') : '<div class="rowline">暂无决定</div>';
+  const people = d.members.filter(m => !m.revoked_at).map(m => esc(m.name)).join('、');
+  return `<h3>任务</h3>${tasks}<h3>最近决定</h3>${ds}<h3>参与者</h3><div class="rowline">${people}</div>`;
 }
 
 function updateShell() {
@@ -206,21 +239,20 @@ function updateShell() {
       : active.dataset.view ? `[data-view="${CSS.escape(active.dataset.view)}"]`
       : active.dataset.action ? `[data-action="${CSS.escape(active.dataset.action)}"]` : null)
     : null;
-
-  shell.scrim.classList.toggle('open', Boolean(state.mobile));
-  shell.sidebar.classList.toggle('open', Boolean(state.mobile));
-  shell.menuButton.setAttribute('aria-expanded', String(Boolean(state.mobile)));
-
-  setRegion(shell.spaceName, `<strong>${esc(d.workspace.name)}</strong><small>独立协作空间 · ${d.members.filter(m=>!m.revoked_at).length} 位成员</small>`, d.workspace.name + '|' + d.members.filter(m=>!m.revoked_at).length);
-  setRegion(shell.nav, nav(), state.view);
-  setRegion(shell.topicList, shellTopicListHTML(d), state.view + '|' + state.topic + '|' + d.topics.map(t => t.id + ':' + t.title).join('|') + '|' + d.topics.map(t => unreadByTopic.get(t.id) || 0).join(','));
-  setRegion(shell.user, `${avatar(state.member)}<div><strong>${esc(state.member.name)}</strong><small>${owner()?'人类 · 组织者':state.member.kind==='ai'?'AI · 参与者':'人类 · 参与者'}</small></div><button class="icon-button" data-action="logout" aria-label="退出当前身份">${icon('exit')}</button>`, [state.member.name, state.member.kind, state.member.role].join('|'));
-  setRegion(shell.breadcrumb, `研究室<span>/</span>${views[state.view]?.[0]||'研究室'}`, state.view);
+  setRegion(shell.spaceName, `${esc(d.workspace.name)}<small> · ${d.members.filter(m=>!m.revoked_at).length} 位成员</small>`, d.workspace.name + '|' + d.members.filter(m=>!m.revoked_at).length);
+  setRegion(shell.strip, stripHTML(d), state.view + '|' + state.topic + '|' + d.topics.map(t => t.id + ':' + t.title + ':' + (unreadByTopic.get(t.id)||0)).join('|'));
+  setRegion(shell.index, indexHTML(d), state.view + '|' + state.topic + '|' + d.topics.map(t => t.id + ':' + t.title + ':' + (unreadByTopic.get(t.id)||0)).join('|') + '|' + d.workspace.name);
+  const userNode = $('#sidebar-user', app);
+  if (userNode) setRegion(userNode, `${avatar(state.member)}<div><strong>${esc(state.member.name)}</strong><small>${owner()?'人类 · 组织者':state.member.kind==='ai'?'AI · 参与者':'人类 · 参与者'}</small></div><button class="icon-button" data-action="logout" aria-label="退出当前身份">${icon('exit')}</button>`, [state.member.name, state.member.kind, state.member.role].join('|'));
+  const conn = $('#connection-label', app);
+  if (conn) conn.innerHTML = state.offline ? '连接暂时中断 · 自动重试中' : `上次同步 ${date(state.lastSync)}<br>每 5 秒检查，不代表 AI 在线`;
+  const sig = $('.signal', app);
+  if (sig) sig.classList.toggle('offline', Boolean(state.offline));
+  setRegion(shell.drawer, drawerHTML(d), [d.tasks.filter(t=>t.status!=='done').length, d.decisions.length, d.members.filter(m=>!m.revoked_at).length, String(drawerOpen), String(state.lastSync)].join('|'));
+  if (drawerOpen) shell.drawerPanel.innerHTML = drawerPanelHTML(d);
+  shell.drawerPanel.classList.toggle('open', drawerOpen);
   setRegion(shell.errorSlot, state.error ? `<div class="error error-banner" role="alert">${esc(state.error)} <button class="text-button" data-action="retry">重试</button></div>` : '', String(state.error));
   updateActionError();
-  shell.connection.innerHTML = state.offline ? '连接暂时中断 · 自动重试中' : `上次同步 ${date(state.lastSync)}<br>每 5 秒检查更新，不代表 AI 在线`;
-  shell.signal.classList.toggle('offline', Boolean(state.offline));
-
   if (focusSel && !app.contains(document.activeElement)) {
     const target = app.querySelector(focusSel);
     if (target) target.focus({preventScroll: true});
@@ -637,6 +669,9 @@ async function submit(form,event) {
 }
 document.addEventListener('submit',event=>{const form=event.target;if(form instanceof HTMLFormElement)submit(form,event);});
 async function performAction(el) {
+  const act = el.dataset ? el.dataset.action : '';
+  if (act === 'drawer-toggle') { drawerOpen = !drawerOpen; updateShell(); return; }
+  if (act === 'drawer-open') { drawerOpen = true; updateShell(); return; }
   const action=el.dataset.action;
 
     if(el.dataset.view){navigate(el.dataset.view);return;}

@@ -1,0 +1,71 @@
+/* Document-desk shell: top-level structure for the accepted C direction. */
+:root{--idx-w:224px;--drawer-h:52px}
+html,body{height:100%;overflow:hidden}
+.docshell{display:flex;flex-direction:column;height:100dvh;overflow:hidden;background:var(--surface)}
+.topbar{flex:none;display:flex;align-items:center;gap:18px;min-height:64px;padding:0 28px;border-bottom:1px solid var(--border);background:var(--surface)}
+.topbar .brand{gap:10px;font-size:18px}
+.topbar .brand-mark{width:30px;height:30px;font-size:18px;border-radius:8px 2px}
+.topbar .brand small{display:none}
+.topbar .workspace-line{font:10.5px/1.6 var(--mono);letter-spacing:.14em;text-transform:uppercase;color:var(--muted);display:flex;gap:10px;align-items:center}
+.topbar .workspace-line b{font:600 13px/1.4 var(--sans);letter-spacing:0;color:var(--ink);text-transform:none}
+.topbar .tools{margin-left:auto;display:flex;align-items:center;gap:8px}
+.topbar .tools .icon-button{min-width:34px;min-height:34px}
+.topbar .tools .button{padding:7px 12px;font-size:12.5px;min-height:34px}
+.docbody{flex:1;min-height:0;display:grid;grid-template-columns:var(--idx-w) minmax(0,1fr);grid-template-rows:minmax(0,1fr);overflow:hidden}
+.docindex{border-right:1px solid var(--border);background:var(--panel);padding:22px 16px;display:flex;flex-direction:column;overflow:auto;gap:2px}
+.docindex .mark{font:600 15px/1 var(--serif);letter-spacing:.14em;margin:0 4px 4px}
+.docindex .mark small{display:block;margin-top:6px;font:8.5px/1 var(--mono);letter-spacing:.28em;color:var(--muted);text-transform:uppercase}
+.docindex h2{margin:22px 4px 6px;font:9px/1 var(--mono);letter-spacing:.24em;text-transform:uppercase;color:var(--muted)}
+.idx-item{display:flex;gap:9px;width:100%;text-align:left;padding:7px 6px;border:0;background:none;color:var(--ink-2);font:12.5px/1.6 var(--sans);border-bottom:1px solid var(--border);cursor:pointer;text-decoration:none}
+.idx-item i{font:9.5px/1.9 var(--mono);color:var(--muted);font-style:normal;min-width:26px}
+.idx-item:hover{color:var(--accent)}
+.idx-item.on{color:var(--ink);font-weight:600}
+.idx-item.on i{color:var(--accent)}
+.idx-item .topic-unread{margin-left:auto;min-width:16px;height:16px;border-radius:8px;background:var(--accent);color:#fff;font:600 9.5px/16px var(--mono);text-align:center;padding:0 5px;font-variant-numeric:tabular-nums}
+.docindex .idx-foot{margin-top:auto;padding-top:14px;font:9.5px/1.8 var(--mono);color:var(--muted)}
+.docindex .idx-foot .connection{display:flex;gap:6px;align-items:flex-start;padding:6px 0}
+.docindex .idx-user{display:flex;align-items:center;gap:8px;padding:8px 0;border-top:1px solid var(--border);margin-top:8px;min-width:0}
+.docindex .idx-user>div{min-width:0;flex:1}
+.docindex .idx-user strong{display:block;font-size:12px;overflow-wrap:anywhere}
+.docindex .idx-user small{display:block;font:9.5px/1.6 var(--mono);color:var(--muted)}
+#main{overflow:auto;min-width:0;padding:0;height:100%;min-height:0}
+.drawer{flex:none;display:flex;align-items:center;gap:22px;min-height:var(--drawer-h);padding:0 28px;border-top:1px solid var(--ink);background:var(--surface);font:10px/1 var(--mono);letter-spacing:.14em;text-transform:uppercase;color:var(--muted)}
+.drawer b{color:var(--ink);letter-spacing:.04em}
+.drawer button.drawer-toggle{margin-left:auto;border:0;background:none;color:var(--accent);font:inherit;cursor:pointer;padding:6px 0}
+.drawer-panel{flex:none;display:none;border-top:1px solid var(--border);background:var(--panel);padding:14px 28px;max-height:32vh;overflow:auto;font-size:12.5px}
+.drawer-panel.open{display:block}
+.drawer-panel h3{font:9px/1 var(--mono);letter-spacing:.22em;text-transform:uppercase;color:var(--muted);margin:12px 0 5px}
+.drawer-panel h3:first-child{margin-top:0}
+.drawer-panel .rowline{line-height:2;color:var(--ink-2)}
+.topicstrip{display:none}
+@media(max-width:980px){
+  .docbody{grid-template-columns:1fr}
+  .docindex{display:none}
+  .topbar{padding:0 16px;min-height:58px;gap:10px}
+  .topbar .workspace-line{display:none}
+  .topicstrip{display:flex;flex:none;overflow-x:auto;border-bottom:1px solid var(--border);background:var(--surface)}
+  .topicstrip button,.topicstrip a{flex:none;border:0;background:none;padding:11px 13px;font:10.5px/1.4 var(--mono);letter-spacing:.05em;color:var(--muted);border-bottom:2px solid transparent;cursor:pointer;text-decoration:none;white-space:nowrap}
+  .topicstrip button.on{color:var(--ink);border-bottom-color:var(--accent)}
+  .topicstrip .no{color:var(--accent);margin-right:6px}
+  .topicstrip .sep{flex:none;width:1px;background:var(--border);margin:8px 4px}
+  .drawer{padding:0 16px;gap:14px;font-size:9.5px}
+  .drawer-panel{padding:12px 16px}
+}
+/* pages inside the doc area sit on the same rhythm as the discussion */
+#main .page{padding:34px 44px 48px;max-width:1000px;margin:0}
+#main .thread-heading{padding:34px 44px 20px;border-bottom:0}
+#main .messages{padding:0 44px}
+#main .composer{margin:24px 44px 30px}
+#main .direction-banner{margin:14px 44px 0}
+@media(max-width:980px){
+  #main .page{padding:22px 18px 30px}
+  #main .thread-heading{padding:24px 18px 16px}
+  #main .messages{padding:0 18px}
+  #main .composer{margin:18px 18px 26px}
+  #main .direction-banner{margin:12px 18px 0}
+}
+/* discussion uses the doc column, never the old two-column split */
+#main .discussion{display:block}
+#main .context-rail{display:none}
+/* gate still uses the old full-screen layout */
+.gate{min-height:100dvh}
