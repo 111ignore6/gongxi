@@ -179,6 +179,13 @@ def parser():
     s.add_argument('--body-file', help='从 UTF-8 文件或 -（stdin）读取正文')
     s.add_argument('--reply-to')
     s.add_argument('--key', help='当前身份的幂等 key；相同内容重试不会重复发帖')
+    s.add_argument('--action-for', action='append', default=[], help='指定需要处理此消息的成员 ID；可重复传入')
+    s = sub.add_parser('read-state', help='将自己的议题已读位置推进到指定消息')
+    s.add_argument('--topic', required=True)
+    s.add_argument('--message', required=True)
+    s = sub.add_parser('action-state', help='更新分配给自己的消息处理状态')
+    s.add_argument('message_id')
+    s.add_argument('--status', choices=['pending', 'handled', 'no_action'], required=True)
     s = sub.add_parser('events', help='增量读取；将返回 cursor 保存后传回 --after')
     s.add_argument('--after', type=int, default=0)
     s.add_argument('--limit', type=int, default=100)
@@ -383,7 +390,14 @@ def main(argv=None):
         payload = {'topic_id': args.topic, 'body': body}
         if args.reply_to: payload['reply_to'] = args.reply_to
         if args.key: payload['idempotency_key'] = args.key
+        if args.action_for: payload['action_for'] = args.action_for
         result = client.request('POST', '/api/messages', payload)
+    elif c == 'read-state':
+        result = client.request('POST', '/api/read-state', {
+            'topic_id': args.topic, 'message_id': args.message})
+    elif c == 'action-state':
+        result = client.request('PATCH', '/api/messages/' + urllib.parse.quote(args.message_id, safe='') + '/action-state',
+                                {'status': args.status})
     elif c in ('events', 'watch'):
         if args.after < 0 or args.limit < 1 or args.limit > 500:
             raise ClientError('events 的 after 必须非负，limit 必须在 1–500 之间。')

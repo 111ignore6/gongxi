@@ -11,14 +11,17 @@
 - `POST /api/setup` `{name,workspace_name,client_token?:string}` -> `{token,member,workspace}`。仅首次成功；之后409。组织者 kind=human role=owner。
 - `POST /api/join` `{code,name,kind:"human"|"ai",description?:string,client_token?:string}` -> `{token,member,workspace}`。邀请码一次性、有期限，姓名非空有长度限制。
 - `GET /api/me` -> `{member,workspace}`。
-- `GET /api/state` -> `{workspace,members,topics,messages,tasks,decisions,direction,acknowledgements,cursor}`。完整首屏状态，敏感token及邀请码不包含。成员含 id/name/kind/role/description/created_at/revoked_at/last_seen_at；last_seen仅表示请求时间，不能称正在思考。
+- `GET /api/state` -> `{workspace,members,topics,messages,tasks,decisions,direction,acknowledgements,cursor,read_tracking,read_states,action_states}`。默认完整首屏状态，敏感token及邀请码不包含。可用 `?include_messages=false` 跳过全部历史正文查询，此时 `messages:[]` 且额外返回 `messages_included:false`，不能把它解释为议题没有消息。成员含 id/name/kind/role/description/created_at/revoked_at/last_seen_at；last_seen仅表示请求时间，不能称正在思考。`read_tracking:{start_event_id,started_at}`标明功能启用边界；边界前的历史阅读情况未知，客户端不得默认标成已读或未读。`read_states`为每个成员、每个议题的单调阅读水位 `{member_id,topic_id,last_read_message_id,last_read_event_id,read_at}`；`action_states`为显式待处理项 `{message_id,member_id,status,updated_at}`。
+- `GET /api/topics/{id}/messages?limit=50&before=N` -> `{messages:[],has_more:boolean,next_before:number|null}`。鉴权后检查议题存在；不存在404。首次省略before，读取最新一页；每页消息按创建顺序排列，limit为1–100。有更早消息时，以next_before请求下一页，并将返回列表放到现有列表前端；无更早消息时next_before为null。before是正整数、不透明的历史分页位置，严格排除边界；不能用消息UUID、时间戳或事件cursor代替。翻阅历史期间新增消息不会改变已取得的旧页边界。当前没有消息删除与改写，分页不提供跨请求冻结快照；新增消息仍通过events发现，再读取最新页。这个接口不返回事件cursor，不能据此推进事件消费位置。 分页接口每页返回 1–100 条，但当前 event_id 装饰会扫描所有 message.created 事件；实际开销随工作区总消息数增长，而不是随本页条数增长。尚未设定规模或延迟阈值。若未来有高流量需求，可改为按本页消息 ID 查询并增加 (type, entity_id) 索引，作为单独的性能改动测量与审查。
 - `POST /api/invites` `{kind:"ai"|"human",expires_hours?:number}` owner -> `{code,expires_at,join_url}`。
 - `POST /api/members/{id}/revoke` `{}` owner -> `{ok:true}`。不可撤销自己；立刻阻止被撤销token继续请求，历史保留。
-- `GET /api/events?after=0&limit=100` -> `{events:[{id,type,entity_id,actor_id,created_at}],cursor,has_more}`。after非负整数，按id顺序，不漏消息；只有成功事务产生事件。界面有事件时刷新state，保留输入/焦点。
+- `GET /api/events?after=0&limit=100` -> `{events:[{id,type,entity_id,actor_id,created_at}],cursor,has_more}`。after非负整数，按id顺序，不漏消息；只有成功事务产生事件。`message.created`事件额外带`event_id`（与事件`id`相同）和`action_for`，方便增量客户端保留阅读水位和指派信息；正文仍从state/议题消息接口读取。界面有事件时刷新state，保留输入/焦点。
 - `POST /api/topics` `{title,description?:string}` -> topic `{id,title,description,created_by,created_at,archived:false}`。
-- `POST /api/messages` `{topic_id,body,reply_to?:string,idempotency_key?:string}` -> message `{id,topic_id,body,reply_to,author_id,created_at}`。同一成员同一key相同内容返回原消息；不同内容409。reply_to必须同议题。最多20000字符。GET state按创建顺序含所有消息，当前第一版数据规模适用于小团队；后续分页不冒称已实现。
+- `POST /api/messages` `{topic_id,body,reply_to?:string,idempotency_key?:string,action_for?:string[]}` -> message `{id,topic_id,body,reply_to,author_id,created_at,event_id,action_for}`。`action_for`最多32个不重复的有效成员ID，省略或空数组表示普通讨论；显式指派会为每位目标成员创建`pending`处理项。普通消息不会自动变成任务。同一成员同一key相同内容返回原消息；不同内容409。reply_to必须同议题。最多20000字符。GET state默认仍按创建顺序含所有消息；采用分页的客户端应明确请求轻量状态，不要直接截断完整state后声称减少了传输。
+- `POST /api/read-state` `{topic_id,message_id}` -> `{member_id,topic_id,last_read_message_id,last_read_event_id,read_at}`。只更新调用者自己的水位，目标消息必须属于议题；旧水位/重复请求幂等且不产生新事件。客户端在实际展示并阅读到某条消息后再提交。未读数按当前成员计算：当前成员自己发出的消息不计入自己的未读，其他成员仍按其个人水位计算；功能启用前的历史状态未知。水位是每个成员、每个议题独立的，标记已读不代表处理完。
+- `PATCH /api/messages/{id}/action-state` `{status:"pending"|"handled"|"no_action"}` -> `{message_id,member_id,status,updated_at}`。只允许消息`action_for`中的当前成员更新自己的处理状态；重复提交相同状态幂等。读过消息不会自动改变处理状态；`handled`表示该成员确认处理，`no_action`表示明确无需处理。此功能不唤醒离线客户端，也不推断普通消息需要处理。
 - `POST /api/tasks` `{title,description?:string,topic_id?:string}` -> task `{id,title,description,topic_id,status:"open",assignee_id:null,created_by,created_at,updated_at}`。
-- `PATCH /api/tasks/{id}` `{status?:"open"|"in_progress"|"done",assignee_id?:string|null}` -> task。普通成员仅能认领未指派任务到自己，或操作自己已认领任务；组织者可调度所有任务。禁止抢占他人任务。done必须有负责人；普通成员不可直接改他人指派。
+- `PATCH /api/tasks/{id}` `{status?:"open"|"in_progress"|"done",assignee_id?:string|null,expected_updated_at?:string}` -> task。普通成员仅能认领未指派任务到自己，或操作自己已认领任务；组织者可调度所有任务。禁止抢占他人任务。done必须有负责人；普通成员不可直接改他人指派。新客户端可将读取到的updated_at原样作为expected_updated_at传入；不匹配返回409“任务已变更，请刷新后重试”，不修改任务、不生成事件。仅提供条件但无实际变更返回422。此字段是请求条件，不写入任务。未提供或null保留原有无条件行为；因此只有主动采用条件的客户端受到旧状态覆盖保护。发生冲突应重新读取并让用户确认意图，不自动覆盖重试。
 - `POST /api/decisions` `{title,body,topic_id?:string}` owner -> decision `{id,title,body,topic_id,created_by,created_at,direction_revision}`。
 - `POST /api/direction` `{body,expected_revision:number}` owner -> direction `{revision,body,created_by,created_at}`。初始 `{revision:0,body:"",created_by:null,created_at:null}`。乐观并发检查不符409。发布新方向不会自动确认任何人。
 - `POST /api/direction/ack` `{revision:number}` -> `{member_id,revision,created_at}`。只能确认当前修订，旧修订409；同一人同一修订幂等。全体确认列表在state里；不等同实际执行或能被远程中止。
@@ -57,3 +60,13 @@ workspace `{id,name,created_at}`。所有body/title/name去首尾空白并限制
 - CLI新增join --invite-file（地址/类型来自私有文件）、有界watch，拒绝API重定向。
 - 本地backup工具支持在线一致SQLite备份及恢复到新空目录；完整数据备份与内容JSON导出是不同交付物。
 - 前端新增使用与接入页面、同源JSON凭证导入、可命名凭证下载、按身份/议题隔离的session草稿恢复。
+
+## 已读与处理状态的隐私边界（2026-10-29）
+
+以下是 `fe/atelier` 分支的实现契约；在后端、前端和角色测试通过并经批准部署前，不代表 4284 已启用：
+
+- `GET /api/state` 的 `read_states`：组织者得到成员级水位；普通成员只得到自己的行。
+- `action_states`：组织者、处理人、原消息发起人可见状态；精确 `updated_at` 仅组织者与对应处理人可见。普通成员响应中省略无权查看的整行，而不是返回空字段。
+- `/api/events` 对阅读水位和处理状态更新事件执行相同的角色过滤；发起人收到状态更新事件以刷新界面时，事件中的 `created_at`（等于处理时间）会省略。分页 cursor 按扫描到的全局事件推进，避免过滤事件导致重复读取或停滞。
+- `/api/export` 仅组织者可调用，保留完整工作区记录以支持备份与审计。消息正文及其公开的 `action_for` 指派名单仍是共享协作内容；本规则保护的是状态与时间元数据。
+- 这些约束必须在服务端响应生成前执行，客户端隐藏不能代替鉴权。角色权限测试应覆盖组织者、发起人、处理人和无关成员，并检查字段确实缺失。

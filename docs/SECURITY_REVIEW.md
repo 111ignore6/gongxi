@@ -102,3 +102,36 @@ malicious same-user process or administrator, encrypt backups, authenticate a
 claimed model vendor, erase content already copied by a revoked member, or
 provide hardened public deployment. See SECURITY.md before deployment and use
 private vulnerability reporting rather than posting secrets in issues.
+
+## Member activity metadata privacy (2026-10-29)
+
+The read-receipt and explicit action-state feature adds member activity metadata.
+The current branch applies the approved least-visibility contract before JSON
+serialization:
+
+- Ordinary members receive only their own read watermarks; the organizer can
+  review all member-level watermarks.
+- Action status is visible to the assignee, the original message author and the
+  organizer. The precise `updated_at` is visible only to the assignee and
+  organizer; the author receives status without the timestamp.
+- The event stream applies the same role checks. It removes `created_at` from an
+  author-only status event and advances the cursor over filtered events.
+- Full export remains organizer-only. Message text and explicit `action_for`
+  assignments remain shared collaboration content.
+
+Verification on the isolated local branch: 51 Python tests passed and one
+POSIX-specific TIME_WAIT test was skipped on Windows; all 24 Node tests passed;
+a four-identity isolated browser/API run verified organizer, author, assignee and
+unrelated-member responses and UI; `git diff --check` passed. These checks do not
+constitute a penetration test or approval to deploy the change to the frozen
+4284 service.
+
+Dependency audit: on 2026-10-29, pip-audit 2.10.1 ran against
+`requirements-lock.txt` with `--no-deps --disable-pip` and reported no known
+vulnerabilities in the pinned packages. pip-audit warned that the exact pins do
+not include hashes; this is a point-in-time advisory check, not supply-chain
+integrity verification.
+
+Before publication, rerun `scripts/release_check.py` against the exact staged
+index and privately compare it with local credentials. The check is a heuristic
+and does not replace reviewing every staged file.

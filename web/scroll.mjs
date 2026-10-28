@@ -1,6 +1,7 @@
 // Discussion positions stay in this page's memory, never in persistent storage.
 export class DiscussionScroll {
-  constructor({getKey, document: doc = globalThis.document, window: win = globalThis.window}) {
+  constructor({getKey, getScroller, document: doc = globalThis.document, window: win = globalThis.window}) {
+    this.getScroller = getScroller || (() => win);
     this.doc = doc;
     this.win = win;
     this.getKey = getKey;
@@ -8,8 +9,29 @@ export class DiscussionScroll {
     this.positions = new Map();
     this.unread = new Set();
     this.button = null;
-    this.win.addEventListener('scroll', () => this.updateButton(), {passive: true});
-    this.win.addEventListener('resize', () => this.updateButton(), {passive: true});
+    this.boundNode = null;
+    this.boundResize = false;
+  }
+
+  bindScroll() {
+    const scroller = this.scroller();
+    if (this.boundNode === scroller) return;
+    if (this.boundNode && this.onScroll) this.boundNode.removeEventListener('scroll', this.onScroll);
+    this.onScroll = this.onScroll || (() => this.updateButton());
+    scroller.addEventListener('scroll', this.onScroll, {passive: true});
+    this.boundNode = scroller;
+    if (!this.boundResize) {
+      this.win.addEventListener('resize', () => this.updateButton(), {passive: true});
+      this.boundResize = true;
+    }
+  }
+  scroller() { const s = this.getScroller(); return s && s.addEventListener ? s : this.win; }
+  scrollTop() { const s = this.scroller(); return s === this.win ? this.win.scrollY : s.scrollTop; }
+  viewportHeight() { const s = this.scroller(); return s === this.win ? this.win.innerHeight : s.clientHeight; }
+  scrollTo(top, behavior) {
+    const s = this.scroller();
+    if (s === this.win) this.win.scrollTo({top, behavior});
+    else s.scrollTo({top, behavior});
   }
 
   messages() { return [...this.doc.querySelectorAll('.discussion .message')]; }
@@ -17,17 +39,17 @@ export class DiscussionScroll {
     const end = this.doc.querySelector('#message-form');
     if (!end) return false;
     const bottom = end.getBoundingClientRect().bottom;
-    return bottom >= 0 && bottom <= this.win.innerHeight + 120;
+    return bottom >= 0 && bottom <= this.viewportHeight() + 120;
   }
   capture() {
     if (!this.key) return null;
     const messages = this.messages();
     const anchor = messages.find(el => {
       const rect = el.getBoundingClientRect();
-      return rect.bottom > 0 && rect.top < this.win.innerHeight;
+      return rect.bottom > 0 && rect.top < this.viewportHeight();
     });
     const snapshot = {
-      key: this.key, y: this.win.scrollY, ids: messages.map(el => el.id),
+      key: this.key, y: this.scrollTop(), ids: messages.map(el => el.id),
       following: this.nearBottom(),
       anchor: anchor ? {id: anchor.id, top: anchor.getBoundingClientRect().top} : null,
       unread: [...this.unread],
@@ -36,6 +58,7 @@ export class DiscussionScroll {
     return snapshot;
   }
   afterRender(snapshot) {
+    this.bindScroll();
     const key = this.getKey();
     const entering = key !== this.key;
     this.key = key;
@@ -52,9 +75,9 @@ export class DiscussionScroll {
     } else {
       const anchor = previous.anchor && this.doc.getElementById(previous.anchor.id);
       const top = anchor
-        ? this.win.scrollY + anchor.getBoundingClientRect().top - previous.anchor.top
+        ? this.scrollTop() + anchor.getBoundingClientRect().top - previous.anchor.top
         : previous.y;
-      this.win.scrollTo({top, behavior: 'instant'});
+      this.scrollTo(top, 'instant');
       this.updateButton();
     }
   }
@@ -63,10 +86,10 @@ export class DiscussionScroll {
     if (!this.key || !end) return;
     const reduced = this.win.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
     this.unread.clear();
-    this.win.scrollTo({
-      top: Math.max(0, this.win.scrollY + end.getBoundingClientRect().bottom - this.win.innerHeight + 20),
-      behavior: smooth && !reduced ? 'smooth' : 'instant',
-    });
+    this.scrollTo(
+      Math.max(0, this.scrollTop() + end.getBoundingClientRect().bottom - this.viewportHeight() + 20),
+      smooth && !reduced ? 'smooth' : 'instant',
+    );
     this.updateButton();
   }
   updateButton() {

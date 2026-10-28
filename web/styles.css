@@ -90,3 +90,23 @@ html:has(.discussion),.thread{overflow-anchor:none}
 .revoked-count{display:inline-flex;justify-content:center;min-width:23px;margin-left:6px;padding:1px 6px;border-radius:12px;background:var(--soft-panel);font-size:12px}
 .revoked-members>p{margin:12px 0 18px}
 .revoked-cards{margin-top:18px}
+
+/* Reading comfort and calmer message actions (2026-10-28). */
+.message{padding:22px 0}
+.message-copy{max-width:70ch}
+.message-actions{opacity:0;transition:opacity .12s ease}
+.message:hover .message-actions,.message:focus-within .message-actions{opacity:1}
+@media (hover:none){.message-actions{opacity:1}}
+.direction-banner.compact{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:11px 15px}
+.direction-banner.compact strong{display:inline;margin:0}
+.direction-banner.compact .fine{margin-left:auto}
+@media(max-width:760px){.direction-banner.compact .fine{margin-left:0}}
+
+/* Sidebar unread badges and a calmer narrow-screen header (2026-10-28). */
+.topic-unread{float:right;min-width:18px;height:18px;border-radius:9px;background:var(--accent);color:#fffaf6;font:11px/18px var(--sans);text-align:center;padding:0 5px;margin-left:6px}
+:root[data-theme="dark"] .topic-unread{color:#201f1b}
+@media(max-width:760px){.breadcrumb{display:none}.header-actions{gap:6px}}
+
+/* Search hits get a short-lived highlight so a long thread is scannable. */
+mark.search-hit{background:#ffe6a1;color:inherit;border-radius:3px;padding:0 2px}
+:root[data-theme="dark"] mark.search-hit{background:#5a4a1d;color:var(--ink)}

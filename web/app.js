@@ -1,5 +1,7 @@
 import {renderMarkdown, exportThreadMarkdown, clearMarkdownCache} from './markdown.mjs';
 import {DiscussionScroll} from './scroll.mjs';
+import {planPatch} from './patch.mjs';
+import {messageEventId, readWatermark, receiptStatus, unreadCounts, visibleReadCandidate} from './read-state.mjs';
 const $ = (s, root = document) => root.querySelector(s);
 const app = $('#app');
 const modal = $('#dialog');
@@ -48,7 +50,7 @@ let toastTimer;
 let composing = false;
 let deferredRender = false;
 let previewing = false;
-const discussionScroll = new DiscussionScroll({getKey: () => state.view === 'discussion' && topic() ? state.topic : null});
+const discussionScroll = new DiscussionScroll({getKey: () => state.view === 'discussion' && topic() ? state.topic : null, getScroller: () => document.getElementById('main') || window});
 
 async function api(path, options = {}) {
   const headers = {'Content-Type':'application/json', ...(state.token ? {Authorization:`Bearer ${state.token}`} : {}), ...options.headers};
@@ -115,13 +117,15 @@ function render(preserve = false) {
   if(preserve&&composing){deferredRender=true;return;}
   const reading = discussionScroll.capture();
   const snapshot = preserve ? captureUI() : null;
-  if (!state.data) renderGate(); else renderWorkspace();
-  if(state.data){const bottom=$('.sidebar-bottom');bottom?.insertAdjacentHTML('afterbegin','<button class="text-button" style="padding:10px" data-action="save-credential">保存我的凭证</button>');}
+  if (!state.data) { resetRegions(); renderGate(); }
+  else { mountShell(); updateShell(); updatePage(); }
   updatePreview();
   restoreUI(snapshot);
   discussionScroll.afterRender(reading);
+  scheduleReadMark();
 }
 function renderGate() {
+  resetRegions();
   let content;
   if (state.gate === 'credentials') return;
   if (pendingEnrollment) content = `<div class="eyebrow">RECOVER / 保留你的席位</div><h2>申请结果还需要确认。</h2><p class="muted">${esc(pendingEnrollment.payload.name)} 的恢复凭证已保存在当前来源的标签页会话中。即使服务器已创建身份但回复丢失，也可用它恢复。</p><div class="flow" style="margin-top:24px">${state.error?`<div class="error" role="alert">${esc(state.error)}</div>`:''}<div class="credentials">${field('待恢复身份凭证',`<input id="pending-credential" type="password" readonly value="${esc(pendingEnrollment.token)}" autocomplete="off">`)}<div class="row" style="margin-top:14px"><button class="button" data-action="show-pending">显示 / 隐藏</button><button class="button" data-action="copy-pending">复制并保存凭证</button></div></div><button class="button primary" data-action="recover-enrollment">检查并恢复身份</button><button class="button" data-action="retry-enrollment">重试原始申请</button><button class="text-button" data-action="cancel-enrollment">检查后返回修改申请</button><p class="fine">重试使用相同凭证，不会因网络错误自动换一个身份。关闭当前标签页会话前请先复制并保存凭证。</p></div>`;
@@ -137,9 +141,267 @@ function renderGate() {
 function nav() {
   return Object.entries(views).filter(([k])=>k!=='search').map(([key,[label,ico]]) => `<button class="nav-item ${state.view === key ? 'active' : ''}" data-view="${key}" ${state.view === key ? 'aria-current="page"' : ''}>${icon(ico)}${label}</button>`).join('');
 }
-function renderWorkspace() {
+let shell = null;
+let directionOpen = false;
+let discussionView = null;
+let drawerOpen = false;
+const messageNodes = new Map();
+const unreadByTopic = new Map();
+const pendingByTopic = new Map();
+function actionFeaturesOn(){return !!(state.data&&Array.isArray(state.data.action_states));}
+
+function updateUnread(d) {
+  const counts = unreadCounts({topics:d.topics,messages:d.messages,
+    readTracking:d.read_tracking,readStates:d.read_states,memberId:state.member?.id});
+  unreadByTopic.clear();
+  for (const [topicId, count] of counts) if (count > 0) unreadByTopic.set(topicId, count);
+  pendingByTopic.clear();
+  const messageById=new Map(d.messages.map(message=>[message.id,message]));
+  for(const item of d.action_states||[]){
+    const message=messageById.get(item.message_id);
+    if(item.member_id===state.member?.id&&item.status==='pending'&&message)
+      pendingByTopic.set(message.topic_id,(pendingByTopic.get(message.topic_id)||0)+1);
+  }
+  const total = [...unreadByTopic.values()].reduce((a, b) => a + b, 0);
+  document.title = total ? '(' + total + ') 共席 · 共同工作的研究室' : '共席 · 共同工作的研究室';
+}
+
+function resetRegions(){ shell = null; discussionView = null; messageNodes.clear(); }
+
+function shellHTML() {
+  return `<div class="docshell">
+    <header class="topbar">${brand()}<div class="workspace-line"><b id="space-name"></b></div><div class="tools">${themePicker()}<button class="icon-button" data-view="search" aria-label="搜索工作区">${icon('search')}</button><button class="icon-button" data-action="drawer-open" aria-label="打开摘要与索引" aria-controls="drawer-panel">${icon('menu')}</button>${owner()?button('邀请参与者','invite'):''}</div></header>
+    <div id="error-slot"></div><div id="action-error"></div>
+    <nav class="topicstrip" id="topic-strip" aria-label="议题与视图"></nav>
+    <div class="docbody"><aside class="docindex" id="doc-index" aria-label="研究室导航"></aside><main id="main" tabindex="-1"></main></div>
+    <div class="drawer" id="drawer"></div>
+    <div class="drawer-panel" id="drawer-panel"></div>
+  </div>`;
+}
+
+function updateStripCue(){
+  const strip = shell && shell.strip;
+  if(!strip || !strip.isConnected) return;
+  const overflow = strip.scrollWidth - strip.clientWidth;
+  if(overflow <= 2){ strip.removeAttribute('data-cue'); return; }
+  const moreRight = overflow - strip.scrollLeft > 2;
+  strip.dataset.cue = moreRight ? 'right' : '';
+}
+
+function mountShell() {
+  if (shell && app.contains(shell.main)) return;
+  app.innerHTML = shellHTML();
+  window.scrollTo(0, 0);
+  shell = {
+    spaceName: $('#space-name', app),
+    strip: $('#topic-strip', app),
+    index: $('#doc-index', app),
+    drawer: $('#drawer', app),
+    drawerPanel: $('#drawer-panel', app),
+    errorSlot: $('#error-slot', app),
+    main: $('#main', app)
+  };
+  discussionView = null;
+  messageNodes.clear();
+  if(shell.strip && !shell.strip.dataset.cueBound){
+    shell.strip.dataset.cueBound = '1';
+    shell.strip.addEventListener('scroll', updateStripCue, {passive:true});
+    shell.strip.addEventListener('focusin', event => {
+      if(event.target && event.target.scrollIntoView) event.target.scrollIntoView({inline:'nearest', block:'nearest'});
+    });
+  }
+  updateStripCue();
+}
+
+function indexHTML(d) {
+  const topics = d.topics.map((t, i) => {
+    const n = unreadByTopic.get(t.id) || 0;
+    const p = pendingByTopic.get(t.id) || 0;
+    const selected = state.view === 'discussion' && state.topic === t.id;
+    return `<button class="idx-item ${selected?'on':''}" data-topic="${esc(t.id)}"><i>${String(i+1).padStart(3,'0')}</i><span>${esc(t.title)}</span>${n?`<span class="topic-unread" aria-label="${n} 条未读">${n}</span>`:''}${p?`<span class="topic-pending" aria-label="${p} 条待处理">${p}</span>`:''}</button>`;
+  }).join('');
+  const work = [['overview','研究室总览'],['plan','共同计划'],['decisions','决定记录'],['members','参与者'],['help','使用与接入']].map(([key,label]) => `<button class="idx-item ${state.view===key?'on':''}" data-view="${key}" ${state.view===key?'aria-current="page"':''}><i>—</i><span>${label}</span></button>`).join('');
+  return `<h2>议题</h2>${topics || '<p class="fine" style="padding:6px">还没有议题。</p>'}
+    <button class="text-button" style="padding:8px 6px" data-action="new-topic">${icon('plus')} 新建议题</button>
+    <button class="text-button" style="padding:6px" data-action="all-topics">全部议题 →</button>
+    <h2>工作</h2>${work}
+    <div class="idx-foot"><div class="connection"><span class="signal"></span><span id="connection-label"></span></div>
+      <div class="idx-user" id="sidebar-user"></div></div>`;
+}
+
+function stripHTML(d) {
+  const topics = d.topics.map((t, i) => {
+    const n = unreadByTopic.get(t.id) || 0;
+    const p = pendingByTopic.get(t.id) || 0;
+    const selected = state.view === 'discussion' && state.topic === t.id;
+    const counts=[n?`${n} 未读`:null,p?`${p} 待处理`:null].filter(Boolean).join(' · ');
+    return `<button class="${selected?'on':''}" data-topic="${esc(t.id)}"><span class="no">${String(i+1).padStart(3,'0')}</span>${esc(t.title)}${counts?` (${counts})`:''}</button>`;
+  }).join('');
+  const work = [['overview','研究室'],['plan','计划'],['decisions','决定'],['members','参与者'],['help','接入']].map(([key,label]) => `<button class="${state.view===key?'on':''}" data-view="${key}">${label}</button>`).join('');
+  return topics + '<span class="sep"></span>' + work;
+}
+
+function drawerHTML(d) {
+  const openTasks = d.tasks.filter(t => t.status !== 'done').length;
+  const active = d.members.filter(m => !m.revoked_at).length;
+  const pending = (d.action_states||[]).filter(x=>x.member_id===state.member.id&&x.status==='pending').length;
+  return `${actionFeaturesOn()?`<span>待处理 <b>${pending}</b></span>`:''}<span>任务 <b>${openTasks}</b></span><span>决定 <b>${d.decisions.length}</b></span><span>参与者 <b>${active}</b></span><span class="sync-line">上次同步 <b>${date(state.lastSync)}</b></span>
+    <button class="drawer-toggle" data-action="drawer-toggle" aria-expanded="${drawerOpen}" aria-controls="drawer-panel">${drawerOpen?'收起索引 ↓':'展开索引 ↑'}</button>`;
+}
+
+function drawerPanelHTML(d) {
+  const tasks = d.tasks.length ? d.tasks.map(t => `<div class="rowline">· ${esc(t.title)} <small>${esc(taskStatus(t.status))}${t.assignee_id?' · '+esc(name(t.assignee_id)):''}</small></div>`).join('') : '<div class="rowline">暂无任务</div>';
+  const ds = d.decisions.length ? d.decisions.slice(-3).map(x => `<div class="rowline">· ${esc(x.title)}</div>`).join('') : '<div class="rowline">暂无决定</div>';
+  const people = d.members.filter(m => !m.revoked_at).map(m => esc(m.name)).join('、');
+  const messages=new Map(d.messages.map(m=>[m.id,m]));
+  const pending=(d.action_states||[]).filter(x=>x.member_id===state.member.id&&x.status==='pending'&&messages.has(x.message_id));
+  const inbox=pending.length?pending.map(item=>{const m=messages.get(item.message_id);return `<button class="rowline pending-action-link" data-topic="${esc(m.topic_id)}" data-scroll-message="${esc(m.id)}">· ${esc(topicName(m.topic_id))} · ${esc(m.body.slice(0,72))}${m.body.length>72?'…':''}<small>待处理 · ${date(item.updated_at)}</small></button>`;}).join(''):'<div class="rowline">当前没有待处理消息。</div>';
+  return `${actionFeaturesOn()?`<h3>我的待处理</h3>${inbox}`:''}<h3>任务</h3>${tasks}<h3>最近决定</h3>${ds}<h3>参与者</h3><div class="rowline">${people}</div>`;
+}
+
+function updateShell() {
   const d = state.data;
-  app.innerHTML = `<div class="mobile-scrim ${state.mobile ? 'open' : ''}" data-action="close-menu"></div><div class="layout"><aside class="sidebar ${state.mobile ? 'open' : ''}" aria-label="研究室导航">${brand()}<div class="space-name"><strong>${esc(d.workspace.name)}</strong><small>独立协作空间 · ${d.members.filter(m=>!m.revoked_at).length} 位成员</small></div><nav class="main-nav" aria-label="主导航">${nav()}</nav><div class="sidebar-label">最近的议题</div><div>${d.topics.slice(-6).reverse().map(t=>`<button class="topic-link ${state.view==='discussion'&&state.topic===t.id?'selected':''}" data-topic="${esc(t.id)}">${esc(t.title)}</button>`).join('') || '<p class="fine" style="padding:0 12px">还没有议题。为第一种看法，写一个开头。</p>'}</div><button class="text-button" style="padding:15px 12px" data-action="new-topic">${icon('plus')} 新建议题</button><div class="sidebar-bottom"><div class="connection"><span class="signal ${state.offline?'offline':''}"></span><span id="connection-label">${state.offline?'连接暂时中断 · 自动重试中':`上次同步 ${date(state.lastSync)}<br>每 5 秒检查更新，不代表 AI 在线`}</span></div><div class="sidebar-user">${avatar(state.member)}<div><strong>${esc(state.member.name)}</strong><small>${owner()?'人类 · 组织者':state.member.kind==='ai'?'AI · 参与者':'人类 · 参与者'}</small></div><button class="icon-button" data-action="logout" aria-label="退出当前身份">${icon('exit')}</button></div></div></aside><section class="workspace"><header class="workspace-header"><button class="icon-button mobile-menu" data-action="menu" aria-label="打开导航" aria-expanded="${state.mobile}">${icon('menu')}</button><div class="breadcrumb">研究室<span>/</span>${views[state.view]?.[0]||'研究室'}</div><div class="header-actions">${themePicker()}<button class="icon-button" data-view="search" aria-label="搜索工作区">${icon('search')}</button>${owner()?button('邀请参与者','invite'):''}</div></header>${state.error?`<div class="error error-banner" role="alert">${esc(state.error)} <button class="text-button" data-action="retry">重试</button></div>`:''}<main id="main" tabindex="-1">${pageContent()}</main></section></div>`;
+  const active = document.activeElement;
+  const focusSel = active && app.contains(active) && active.dataset
+    ? (active.dataset.topic ? `[data-topic="${CSS.escape(active.dataset.topic)}"]`
+      : active.dataset.view ? `[data-view="${CSS.escape(active.dataset.view)}"]`
+      : active.dataset.action ? `[data-action="${CSS.escape(active.dataset.action)}"]` : null)
+    : null;
+  setRegion(shell.spaceName, `${esc(d.workspace.name)}<small> · ${d.members.filter(m=>!m.revoked_at).length} 位成员</small>`, d.workspace.name + '|' + d.members.filter(m=>!m.revoked_at).length);
+  setRegion(shell.strip, stripHTML(d), state.view + '|' + state.topic + '|' + d.topics.map(t => t.id + ':' + t.title + ':' + (unreadByTopic.get(t.id)||0) + ':' + (pendingByTopic.get(t.id)||0)).join('|'));
+  updateStripCue();
+  setRegion(shell.index, indexHTML(d), state.view + '|' + state.topic + '|' + d.topics.map(t => t.id + ':' + t.title + ':' + (unreadByTopic.get(t.id)||0) + ':' + (pendingByTopic.get(t.id)||0)).join('|') + '|' + d.workspace.name);
+  const userNode = $('#sidebar-user', app);
+  if (userNode) setRegion(userNode, `${avatar(state.member)}<div><strong>${esc(state.member.name)}</strong><small>${owner()?'人类 · 组织者':state.member.kind==='ai'?'AI · 参与者':'人类 · 参与者'}</small></div><button class="icon-button" data-action="logout" aria-label="退出当前身份">${icon('exit')}</button>`, [state.member.name, state.member.kind, state.member.role].join('|'));
+  const conn = $('#connection-label', app);
+  if (conn) conn.innerHTML = state.offline ? '连接暂时中断 · 自动重试中' : `上次同步 ${date(state.lastSync)}<br>每 5 秒检查，不代表 AI 在线`;
+  const sig = $('.signal', app);
+  if (sig) sig.classList.toggle('offline', Boolean(state.offline));
+  setRegion(shell.drawer, drawerHTML(d), [d.tasks.filter(t=>t.status!=='done').length, d.decisions.length, d.members.filter(m=>!m.revoked_at).length, String(drawerOpen), String(state.lastSync)].join('|'));
+  if (drawerOpen) shell.drawerPanel.innerHTML = drawerPanelHTML(d);
+  shell.drawerPanel.classList.toggle('open', drawerOpen);
+  const topDrawerButton = app.querySelector('[data-action="drawer-open"]');
+  if (topDrawerButton) topDrawerButton.setAttribute('aria-expanded', String(drawerOpen));
+  setRegion(shell.errorSlot, state.error ? `<div class="error error-banner" role="alert">${esc(state.error)} <button class="text-button" data-action="retry">重试</button></div>` : '', String(state.error));
+  updateActionError();
+  if (focusSel && !app.contains(document.activeElement)) {
+    const target = app.querySelector(focusSel);
+    if (target) target.focus({preventScroll: true});
+  }
+}
+
+function updatePage() {
+  if (state.view === 'discussion') { updateDiscussion(); return; }
+  if (discussionView) { discussionView = null; messageNodes.clear(); }
+  shell.main.innerHTML = pageContent();
+}
+
+function setRegion(node, html, key) {
+  if (!node || node.dataset.regionKey === key) return;
+  node.dataset.regionKey = key;
+  node.innerHTML = html;
+}
+
+function threadHeadingHTML(t, count) {
+  return `<div class="eyebrow">DISCUSSION / 共同讨论</div><h1>${esc(t.title)}</h1>${t.description?`<p>${esc(t.description)}</p>`:''}<div class="thread-meta"><span class="badge green">讨论中</span><span>${count} 条发言</span><button class="text-button" data-action="export-thread">${icon('download')} 导出 Markdown</button><span>${esc(name(t.created_by))} 创建 · ${date(t.created_at)}</span></div>`;
+}
+
+function replyBarHTML() {
+  const reply = state.reply && state.data.messages.find(x => x.id === state.reply);
+  if (!reply) return '';
+  return `<div class="reply-bar"><span>回复 ${esc(name(reply.author_id))}：${esc(reply.body.slice(0,65))}${reply.body.length>65?'…':''}</span><button type="button" class="icon-button" data-action="cancel-reply" aria-label="取消回复">${icon('close')}</button></div>`;
+}
+
+function contextRailHTML(tasks, ds) {
+  const shownDs = ds.slice(-3);
+  const shownTasks = tasks.slice(-3);
+  return `<section class="rail-section"><div class="eyebrow">SHARED NOTEBOOK</div><h3 style="margin-top:14px">每一次改变，<br>都能找到它的来处。</h3><p>讨论留在这里，工作由成员在自己的环境里继续。</p></section><section class="rail-section"><h2>这个议题的决定</h2>${shownDs.length?shownDs.map(x=>`<div class="rail-entry">${esc(x.title)}<small>${date(x.created_at)} · 方向 v${x.direction_revision}</small></div>`).join(''):'<p>尚未记录决定。观点一致不自动等于共同决定。</p>'}${ds.length>3?`<button class="text-button" data-view="decisions">查看全部 ${ds.length} 条决定 →</button>`:''}${owner()?button('记录决定','new-decision'):''}</section><section class="rail-section"><h2>接下来</h2>${shownTasks.length?shownTasks.map(x=>`<div class="rail-entry">${esc(x.title)}<small>${esc(taskStatus(x.status))} · ${x.assignee_id?esc(name(x.assignee_id)):'暂无负责人'}</small></div>`).join(''):'<p>尚未拆成任务。</p>'}${tasks.length>3?`<button class="text-button" data-view="plan">查看全部 ${tasks.length} 个任务 →</button>`:''}${button('添加任务','new-task')}</section><p class="fine">来源身份由参与者声明。最近读取时间不表示正在思考。</p>`;
+}
+
+function discussionSkeleton(t) {
+  return `<div class="discussion"><section class="thread"><header class="thread-heading" id="thread-heading"></header><div id="direction-slot"></div><div id="tracking-slot"></div><div class="messages" id="message-list"></div><form id="message-form" class="composer"><div id="reply-slot"></div><div class="composer-tools"><div class="composer-tabs" role="group" aria-label="编辑模式"><button type="button" data-action="compose-edit" aria-pressed="${!previewing}" class="${!previewing?'active':''}">编辑</button><button type="button" data-action="compose-preview" aria-pressed="${previewing}" class="${previewing?'active':''}">预览</button></div><span class="fine">支持 Markdown · Ctrl / ⌘ + Enter 发表</span></div><label class="field" ${previewing?'hidden':''}><span class="sr-only">发表你的看法</span><textarea id="message-draft" name="body" placeholder="提出看法、追问，或带来新的依据…" required maxlength="20000">${esc(getDraft(t.id))}</textarea></label><div id="message-preview" class="composer-preview markdown-body" ${!previewing?'hidden':''} aria-label="发言预览"></div><div class="form-error" role="alert"></div><footer class="composer-foot"><span>以 ${esc(state.member.name)} 发言<br>发出消息不代表其他 AI 已读取或回应</span><button class="button primary" type="submit">发表 ${icon('arrow')}</button></footer></form></section><aside class="context-rail" id="context-rail"></aside></div>`;
+}
+
+function actionTargetsHTML(){
+  if(!actionFeaturesOn())return '';
+  const members=state.data.members.filter(m=>!m.revoked_at);
+  if(!members.length)return '';
+  return `<details class="action-target-picker"><summary>需要谁处理？（可选）</summary><div class="action-target-list">${members.map(m=>`<label><input type="checkbox" name="action_for" value="${esc(m.id)}"><span>${esc(m.name)}${m.id===state.member.id?' · 我':''}</span></label>`).join('')}</div><p class="fine">只会提醒明确选择的成员；普通发言不会自动变成待办。</p></details>`;
+}
+
+function authorSignature(id) {
+  const a = member(id);
+  return [a.name || '', a.kind || '', a.role || '', a.revoked_at ? '1' : '0'].join('|');
+}
+
+function diffMessages(messages) {
+  const list = discussionView.list;
+  const emptyBlock = list.querySelector('[data-empty-thread]');
+  if (!messages.length) {
+    if (!emptyBlock) list.innerHTML = `<div data-empty-thread style="padding:30px 0">${empty('留一点空间，给第一种看法。','还没有人发言。你可以先补充背景、提出假设，或邀请其他参与者加入。')}</div>`;
+    return;
+  }
+  if (emptyBlock) emptyBlock.remove();
+  let cursor = null;
+  for (const m of messages) {
+    let el = messageNodes.get(m.id);
+    if (!el) {
+      const holder = document.createElement('div');
+      holder.innerHTML = messageEntry(m);
+      el = holder.firstElementChild;
+      el.dataset.authorSig = authorSignature(m.author_id);
+      messageNodes.set(m.id, el);
+      if (cursor && cursor.nextSibling) list.insertBefore(el, cursor.nextSibling); else list.appendChild(el);
+    }
+    else if (el.dataset.authorSig !== authorSignature(m.author_id)) {
+      el.dataset.authorSig = authorSignature(m.author_id);
+      const avatarSlot = el.querySelector('.avatar');
+      if (avatarSlot) avatarSlot.outerHTML = avatar(member(m.author_id));
+      const byline = el.querySelector('.byline');
+      if (byline) byline.innerHTML = bylineHTML(m);
+    }
+    const stateSlot=el.querySelector('.message-state-slot');
+    if(stateSlot)stateSlot.innerHTML=messageActionHTML(m)+receiptsHTML(m);
+    cursor = el;
+  }
+  for (const id of planPatch([...messageNodes.keys()], messages.map(m => m.id)).remove) {
+    messageNodes.get(id)?.remove();
+    messageNodes.delete(id);
+  }
+}
+
+function updateDiscussion() {
+  const t = topic();
+  if (!t) { discussionView = null; messageNodes.clear(); shell.main.innerHTML = pageContent(); return; }
+  if (!discussionView || discussionView.topicId !== t.id || !shell.main.contains(discussionView.root)) {
+    shell.main.innerHTML = discussionSkeleton(t);
+    discussionView = {
+      topicId: t.id,
+      root: $('#main .discussion'),
+      heading: $('#thread-heading'),
+      banner: $('#direction-slot'),
+      tracking: $('#tracking-slot'),
+      list: $('#message-list'),
+      replySlot: $('#reply-slot'),
+      actionTargets: null,
+      rail: $('#context-rail')
+    };
+    const composerTools=$('#message-form .composer-tools');
+    if(composerTools){const slot=document.createElement('div');slot.id='action-target-slot';composerTools.after(slot);discussionView.actionTargets=slot;}
+    messageNodes.clear();
+  }
+  const messages = state.data.messages.filter(m => m.topic_id === t.id);
+  const tasks = state.data.tasks.filter(x => x.topic_id === t.id);
+  const ds = state.data.decisions.filter(x => x.topic_id === t.id);
+  discussionView.heading.innerHTML = threadHeadingHTML(t, messages.length);
+  setRegion(discussionView.banner, directionBanner(), 'v' + state.data.direction.revision + '|' + acked() + '|' + ackCount() + '|' + directionOpen);
+  setRegion(discussionView.tracking, trackingNoteHTML(), JSON.stringify(state.data.read_tracking || null));
+  const targetKey=state.data.members.filter(m=>!m.revoked_at).map(m=>m.id+':'+m.name).join('|');
+  setRegion(discussionView.actionTargets, actionTargetsHTML(), targetKey);
+  diffMessages(messages);
+  discussionView.replySlot.innerHTML = replyBarHTML();
+  applyComposerMode();
+  setRegion(discussionView.rail, contextRailHTML(tasks, ds), tasks.map(x => x.id + x.status + (x.assignee_id || '')).join(',') + '|' + ds.map(x => x.id).join(',') + '|' + owner());
 }
 function heading(eyebrow,title,description,action='') { return `<div class="page-heading"><div><div class="eyebrow">${esc(eyebrow)}</div><h1>${esc(title)}</h1><p>${esc(description)}</p></div>${action}</div>`; }
 function pageContent() {
@@ -157,7 +419,12 @@ function acked() {return state.data.acknowledgements.some(a=>a.member_id===state
 function directionBanner() {
   const d=state.data.direction;
   if (!d.revision) return '';
-  return `<aside class="direction-banner" aria-label="共同方向"><strong>共同方向 v${d.revision} · ${acked()?'你已明确确认':'等待你阅读与确认'}</strong><p>${esc(d.body)}</p><div class="row"><span class="fine">${ackCount()} 位成员已确认；不表示已执行或可以远程中止。</span>${!acked()?button('我已阅读并确认','ack'):''}</div></aside>`;
+  const confirmed=acked();
+  const count=ackCount();
+  if (confirmed && !directionOpen) {
+    return `<aside class="direction-banner compact" aria-label="共同方向"><strong>共同方向 v${d.revision} · 你已明确确认</strong><span class="fine">${count} 位成员已确认</span><button class="text-button" data-action="toggle-direction" aria-expanded="false">展开全文</button></aside>`;
+  }
+  return `<aside class="direction-banner" aria-label="共同方向"><strong>共同方向 v${d.revision} · ${confirmed?'你已明确确认':'等待你阅读并确认'}</strong><p>${esc(d.body)}</p><div class="row"><span class="fine">${count} 位成员已确认；不表示已执行或可以远程中止。</span>${!confirmed?button('我已阅读并确认','ack'):'<button class="text-button" data-action="toggle-direction" aria-expanded="true">收起</button>'}</div></aside>`;
 }
 function discussion() {
   const t=topic();
@@ -166,11 +433,116 @@ function discussion() {
   const tasks=state.data.tasks.filter(x=>x.topic_id===t.id);
   const ds=state.data.decisions.filter(x=>x.topic_id===t.id);
   const reply=state.reply && state.data.messages.find(x=>x.id===state.reply);
-  return `<div class="discussion"><section class="thread"><header class="thread-heading"><div class="eyebrow">DISCUSSION / 共同讨论</div><h1>${esc(t.title)}</h1>${t.description?`<p>${esc(t.description)}</p>`:''}<div class="thread-meta"><span class="badge green">讨论中</span><span>${messages.length} 条发言</span><button class="text-button" data-action="export-thread">${icon('download')} 导出 Markdown</button><span>${esc(name(t.created_by))} 创建 · ${date(t.created_at)}</span></div></header>${directionBanner()}<div class="messages">${messages.length?messages.map(messageEntry).join(''):`<div style="padding:30px 0">${empty('留一点空间，给第一种看法。','还没有人发言。你可以先补充背景、提出假设，或邀请其他参与者加入。')}</div>`}</div><form id="message-form" class="composer">${reply?`<div class="reply-bar"><span>回复 ${esc(name(reply.author_id))}：${esc(reply.body.slice(0,65))}${reply.body.length>65?'…':''}</span><button type="button" class="icon-button" data-action="cancel-reply" aria-label="取消回复">${icon('close')}</button></div>`:''}<div class="composer-tools"><div class="composer-tabs" role="group" aria-label="编辑模式"><button type="button" data-action="compose-edit" aria-pressed="${!previewing}" class="${!previewing?'active':''}">编辑</button><button type="button" data-action="compose-preview" aria-pressed="${previewing}" class="${previewing?'active':''}">预览</button></div><span class="fine">支持 Markdown · Ctrl / ⌘ + Enter 发表</span></div><label class="field" ${previewing?'hidden':''}><span class="sr-only">发表你的看法</span><textarea id="message-draft" name="body" placeholder="提出看法、追问，或带来新的依据…" required maxlength="20000">${esc(getDraft(t.id))}</textarea></label><div id="message-preview" class="composer-preview markdown-body" ${!previewing?'hidden':''} aria-label="发言预览"></div><div class="form-error" role="alert"></div><footer class="composer-foot"><span>以 ${esc(state.member.name)} 发言<br>发出消息不代表其他 AI 已读取或回应</span><button class="button primary" type="submit">发表 ${icon('arrow')}</button></footer></form></section><aside class="context-rail"><section class="rail-section"><div class="eyebrow">SHARED NOTEBOOK</div><h3 style="margin-top:14px">每一次改变，<br>都能找到它的来处。</h3><p>讨论留在这里，工作由成员在自己的环境里继续。</p></section><section class="rail-section"><h2>这个议题的决定</h2>${ds.length?ds.map(x=>`<div class="rail-entry">${esc(x.title)}<small>${date(x.created_at)} · 方向 v${x.direction_revision}</small></div>`).join(''):'<p>尚未记录决定。观点一致不自动等于共同决定。</p>'}${owner()?button('记录决定','new-decision'):''}</section><section class="rail-section"><h2>接下来</h2>${tasks.length?tasks.map(x=>`<div class="rail-entry">${esc(x.title)}<small>${esc(taskStatus(x.status))} · ${x.assignee_id?esc(name(x.assignee_id)):'暂无负责人'}</small></div>`).join(''):'<p>尚未拆成任务。</p>'}${button('添加任务','new-task')}</section><p class="fine">来源身份由参与者声明。最近读取时间不表示正在思考。</p></aside></div>`;
+  return `<div class="discussion"><section class="thread"><header class="thread-heading"><div class="eyebrow">DISCUSSION / 共同讨论</div><h1>${esc(t.title)}</h1>${t.description?`<p>${esc(t.description)}</p>`:''}<div class="thread-meta"><span class="badge green">讨论中</span><span>${messages.length} 条发言</span><button class="text-button" data-action="export-thread">${icon('download')} 导出 Markdown</button><span>${esc(name(t.created_by))} 创建 · ${date(t.created_at)}</span></div></header>${directionBanner()}${trackingNoteHTML()}<div class="messages">${messages.length?messages.map(messageEntry).join(''):`<div style="padding:30px 0">${empty('留一点空间，给第一种看法。','还没有人发言。你可以先补充背景、提出假设，或邀请其他参与者加入。')}</div>`}</div><form id="message-form" class="composer">${reply?`<div class="reply-bar"><span>回复 ${esc(name(reply.author_id))}：${esc(reply.body.slice(0,65))}${reply.body.length>65?'…':''}</span><button type="button" class="icon-button" data-action="cancel-reply" aria-label="取消回复">${icon('close')}</button></div>`:''}<div class="composer-tools"><div class="composer-tabs" role="group" aria-label="编辑模式"><button type="button" data-action="compose-edit" aria-pressed="${!previewing}" class="${!previewing?'active':''}">编辑</button><button type="button" data-action="compose-preview" aria-pressed="${previewing}" class="${previewing?'active':''}">预览</button></div><span class="fine">支持 Markdown · Ctrl / ⌘ + Enter 发表</span></div><label class="field" ${previewing?'hidden':''}><span class="sr-only">发表你的看法</span><textarea id="message-draft" name="body" placeholder="提出看法、追问，或带来新的依据…" required maxlength="20000">${esc(getDraft(t.id))}</textarea></label><div id="message-preview" class="composer-preview markdown-body" ${!previewing?'hidden':''} aria-label="发言预览"></div><div class="form-error" role="alert"></div><footer class="composer-foot"><span>以 ${esc(state.member.name)} 发言<br>发出消息不代表其他 AI 已读取或回应</span><button class="button primary" type="submit">发表 ${icon('arrow')}</button></footer></form></section><aside class="context-rail"><section class="rail-section"><div class="eyebrow">SHARED NOTEBOOK</div><h3 style="margin-top:14px">每一次改变，<br>都能找到它的来处。</h3><p>讨论留在这里，工作由成员在自己的环境里继续。</p></section><section class="rail-section"><h2>这个议题的决定</h2>${ds.length?ds.map(x=>`<div class="rail-entry">${esc(x.title)}<small>${date(x.created_at)} · 方向 v${x.direction_revision}</small></div>`).join(''):'<p>尚未记录决定。观点一致不自动等于共同决定。</p>'}${owner()?button('记录决定','new-decision'):''}</section><section class="rail-section"><h2>接下来</h2>${tasks.length?tasks.map(x=>`<div class="rail-entry">${esc(x.title)}<small>${esc(taskStatus(x.status))} · ${x.assignee_id?esc(name(x.assignee_id)):'暂无负责人'}</small></div>`).join(''):'<p>尚未拆成任务。</p>'}${button('添加任务','new-task')}</section><p class="fine">来源身份由参与者声明。最近读取时间不表示正在思考。</p></aside></div>`;
 }
+
+function readTrackingOn(){return !!(state.data && state.data.read_tracking && Array.isArray(state.data.read_states));}
+function readStates(){return state.data && Array.isArray(state.data.read_states) ? state.data.read_states : null;}
+function receiptsHTML(m){
+  if(!readTrackingOn() || !readStates()) return '';
+  const tracking = state.data.read_tracking;
+  const states = state.data.read_states;
+  const chips = [];
+  const canSeeAll = owner();
+  for (const mem of state.data.members.filter(x => !x.revoked_at)) {
+    if (mem.id === state.member?.id) continue;
+    const row = states.find(r => r.member_id === mem.id && r.topic_id === m.topic_id);
+    if (!row && !canSeeAll) continue;
+    const status = receiptStatus(m, tracking, states, mem.id);
+    if (status === 'unknown') continue;
+    if (status === 'read') {
+      const wm = readWatermark(states, mem.id, m.topic_id);
+      chips.push(`<span class="receipt seen">已读 · ${esc(mem.name)} ${wm && wm.at ? date(wm.at) : ''}</span>`);
+    } else {
+      chips.push(`<span class="receipt unseen">未读 · ${esc(mem.name)}</span>`);
+    }
+  }
+  if(!chips.length) return '';
+  return `<div class="message-receipts" aria-label="阅读状态">${chips.join('')}</div>`;
+}
+let readMarkTimer=null;
+let readObserver=null;
+let visibleReadMessages=new Map();
+let readMarkSending=false;
+function stopReadObservation(){
+  clearTimeout(readMarkTimer);readMarkTimer=null;
+  readObserver?.disconnect();readObserver=null;
+  visibleReadMessages.clear();
+}
+function queueVisibleReadMark(topicId,delay=900){
+  if(readMarkTimer||!visibleReadMessages.size)return;
+  readMarkTimer=setTimeout(async()=>{
+    readMarkTimer=null;
+    if(state.view!=='discussion'||state.topic!==topicId||!readTrackingOn())return;
+    const now=performance.now();
+    const entries=[...visibleReadMessages.values()];
+    const watermark=readWatermark(readStates(),state.member.id,topicId);
+    const candidate=visibleReadCandidate(entries,watermark?.event,now);
+    if(!candidate.message){if(candidate.waitMs!==null)queueVisibleReadMark(topicId,candidate.waitMs);return;}
+    const target=candidate.message;
+    readMarkSending=true;
+    try{await api('/read-state',{method:'POST',body:JSON.stringify({topic_id:topicId,message_id:target.id})});await refresh(true);}
+    catch{}
+    finally{readMarkSending=false;}
+  },delay);
+}
+function scheduleReadMark(){
+  stopReadObservation();
+  const main=$('#main');
+  if(!readTrackingOn() || state.view!=='discussion' || !state.topic || !main || !window.IntersectionObserver || readMarkSending) return;
+  const rows=state.data.messages.filter(m=>m.topic_id===state.topic && messageEventId(m)!==null);
+  if(!rows.length) return;
+  const byId=new Map(rows.map(m=>[m.id,m]));
+  readObserver=new IntersectionObserver(entries=>{
+    for(const entry of entries){
+      const messageId=entry.target.id.startsWith('message-')?entry.target.id.slice(8):'';
+      if(!byId.has(messageId)) continue;
+      if(entry.isIntersecting){
+        if(!visibleReadMessages.has(messageId)) visibleReadMessages.set(messageId,{message:byId.get(messageId),since:performance.now()});
+      }else visibleReadMessages.delete(messageId);
+    }
+    if(visibleReadMessages.size)queueVisibleReadMark(state.topic);
+  },{root:main,threshold:0.05});
+  for(const message of rows){const node=document.getElementById(`message-${message.id}`);if(node)readObserver.observe(node);}
+}
+function trackingNoteHTML(){
+  const t=state.data && state.data.read_tracking; if(!t) return '';
+  const start=t.start_event_id != null ? t.start_event_id : null;
+  const at=t.started_at || null;
+  return `<div class="tracking-note">已读跟踪${at?`自 ${date(at)} 起`:''}生效 · 更早的消息状态未知${start!=null?`（起始游标 ${esc(String(start))}）`:''}</div>`;
+}
+
+
+function bylineHTML(m) {
+  const author = member(m.author_id);
+  return `<strong>${esc(author.name)}</strong><span class="badge">${author.kind==='ai'?'AI':'人类'}${author.revoked_at?' · 已撤销':''}</span>${author.role==='owner'?'<span class="fine">组织者</span>':''}<time datetime="${esc(m.created_at)}">${date(m.created_at)}</time>`;
+}
+
+function messageActionHTML(m){
+  if(!actionFeaturesOn())return '';
+  const targets = (m.action_for || []).filter(Boolean);
+  if (!targets.length) return '';
+  const states = state.data.action_states || [];
+  const labels = {pending: '待处理', handled: '已处理', no_action: '无需处理'};
+  const rows = targets.map(id => {
+    const mem = member(id);
+    if (!mem) return '';
+    const hit = states.find(s => s.message_id === m.id && s.member_id === id);
+    if (!hit && id !== (state.member && state.member.id) && !owner()) return '';
+    const status = hit ? hit.status : 'pending';
+    const mine = id === (state.member && state.member.id);
+    const controls = mine
+      ? `<span class="message-action-controls">${['handled','no_action','pending'].filter(s => s !== status).map(s =>
+          `<button type="button" data-message-id="${esc(m.id)}" data-action-status="${s}">${s === 'handled' ? '标记已处理' : s === 'no_action' ? '无需处理' : '恢复待处理'}</button>`).join('')}</span>`
+      : '';
+    return `<div class="message-action-row"><span>${esc(mem.name)} · ${labels[status] || status}</span>${controls}</div>`;
+  }).join('');
+  return rows ? `<div class="message-action-state"><strong>处理状态</strong>${rows}</div>` : '';
+}
+
 function messageEntry(m) {
   const author=member(m.author_id); const quote=m.reply_to&&state.data.messages.find(x=>x.id===m.reply_to);
-  return `<article class="message" id="message-${esc(m.id)}">${avatar(author)}<div class="message-body"><header class="byline"><strong>${esc(author.name)}</strong><span class="badge">${author.kind==='ai'?'AI':'人类'}${author.revoked_at?' · 已撤销':''}</span>${author.role==='owner'?'<span class="fine">组织者</span>':''}<time datetime="${esc(m.created_at)}">${date(m.created_at)}</time></header>${quote?`<blockquote><button class="text-button" data-jump="${esc(quote.id)}">引用 ${esc(name(quote.author_id))}</button><br>${esc(quote.body.slice(0,250))}${quote.body.length>250?'…':''}</blockquote>`:''}<div class="message-copy markdown-body">${renderMarkdown(m.body)}</div><footer class="message-actions"><button data-reply="${esc(m.id)}">回复 / 引用</button><button data-copy-message="${esc(m.id)}">复制内容</button></footer></div></article>`;
+  return `<article class="message" id="message-${esc(m.id)}">${avatar(author)}<div class="message-body"><header class="byline">${bylineHTML(m)}</header>${quote?`<blockquote><button class="text-button" data-jump="${esc(quote.id)}">引用 ${esc(name(quote.author_id))}</button><br>${esc(quote.body.slice(0,250))}${quote.body.length>250?'…':''}</blockquote>`:''}<div class="message-copy markdown-body">${renderMarkdown(m.body)}</div><footer class="message-actions"><button data-reply="${esc(m.id)}">回复 / 引用</button><button data-copy-message="${esc(m.id)}">复制内容</button></footer><div class="message-state-slot">${messageActionHTML(m)}${receiptsHTML(m)}</div></div></article>`;
 }
 function taskEntry(t) {
   const canEdit=owner()||t.assignee_id===state.member.id;
@@ -201,16 +573,24 @@ function updatePreview() {
   const preview=$('#message-preview');
   if(preview && previewing) preview.innerHTML=renderMarkdown($('#message-draft')?.value||'');
 }
+function applyComposerMode() {
+  const draft = $('#message-draft');
+  const preview = $('#message-preview');
+  if (!draft || !preview) return;
+  draft.closest('label').hidden = previewing;
+  preview.hidden = !previewing;
+  for (const el of document.querySelectorAll('.composer-tabs button')) {
+    const active = (el.dataset.action === 'compose-preview') === previewing;
+    el.setAttribute('aria-pressed', String(active));
+    el.classList.toggle('active', active);
+  }
+}
+
 function setComposerMode(preview) {
   const draft=$('#message-draft');
   if(!draft) return;
   previewing=preview;
-  draft.closest('label').hidden=preview;
-  $('#message-preview').hidden=!preview;
-  for(const el of document.querySelectorAll('.composer-tabs button')) {
-    const active=(el.dataset.action==='compose-preview')===preview;
-    el.setAttribute('aria-pressed',String(active));el.classList.toggle('active',active);
-  }
+  applyComposerMode();
   updatePreview();
   if(!preview) draft.focus({preventScroll:true});
 }
@@ -219,9 +599,43 @@ function downloadText(text,filename,type='text/markdown;charset=utf-8') {
   const link=document.createElement('a');link.href=url;link.download=filename;link.click();
   setTimeout(()=>URL.revokeObjectURL(url),2000);
 }
+let hitTimer = null;
+function clearSearchHits() {
+  document.querySelectorAll('mark.search-hit').forEach(mark => {
+    const parent = mark.parentNode;
+    if (!parent) return;
+    parent.replaceChild(document.createTextNode(mark.textContent), mark);
+    parent.normalize();
+  });
+  if (hitTimer) { clearTimeout(hitTimer); hitTimer = null; }
+}
+
+function highlightSearchHits(root, query) {
+  clearSearchHits();
+  const q = String(query || '').trim();
+  if (!q || !root) return;
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  const nodes = [];
+  while (walker.nextNode()) nodes.push(walker.currentNode);
+  const lower = q.toLowerCase();
+  for (const node of nodes) {
+    const text = node.nodeValue || '';
+    const index = text.toLowerCase().indexOf(lower);
+    if (index < 0) continue;
+    const mid = node.splitText(index);
+    mid.splitText(q.length);
+    const mark = document.createElement('mark');
+    mark.className = 'search-hit';
+    mark.textContent = mid.nodeValue;
+    mid.parentNode.replaceChild(mark, mid);
+  }
+  hitTimer = setTimeout(clearSearchHits, 5000);
+}
+
 function navigate(view, topicId='') {
   if (state.view==='discussion' && $('#message-draft')) saveDraft(state.topic,$('#message-draft').value);
   if (view==='discussion') state.topic=topicId||state.topic;
+  if (state.data) updateUnread(state.data);
   state.view=view;state.reply=null;state.mobile=false;previewing=false;
   const params=new URLSearchParams({view});if(state.topic&&view==='discussion')params.set('topic',state.topic);
   history.replaceState(null,'',`/?${params}`);
@@ -237,6 +651,9 @@ function currentDrafts(){try{const prefix=draftPrefix();const entries=Array.from
 function formatDrafts(entries){return entries.map(({title,body})=>`议题：${title}\n\n${body}`).join('\n\n────────\n\n');}
 function clearOwnDrafts(){try{const prefix=draftPrefix();Array.from({length:sessionStorage.length},(_,i)=>sessionStorage.key(i)).filter(k=>k?.startsWith(prefix)).forEach(k=>sessionStorage.removeItem(k));}catch{}}
 const pendingMessages=new Map();
+function savePendingMessages(){try{sessionStorage.setItem('gongxi.pendingMessages',JSON.stringify([...pendingMessages]));}catch{}}
+function loadPendingMessages(){try{const raw=sessionStorage.getItem('gongxi.pendingMessages');if(raw)for(const pair of JSON.parse(raw))pendingMessages.set(pair[0],pair[1]);}catch{}}
+loadPendingMessages();
 function openDialog(title, body) {
   savedFocus=document.activeElement;
   modal.innerHTML=`<header class="dialog-header"><h2 id="dialog-title">${esc(title)}</h2><button class="icon-button" data-action="close-dialog" aria-label="关闭对话框">${icon('close')}</button></header><div class="dialog-body">${body}</div>`;
@@ -272,7 +689,7 @@ function saveCredentialMeta(){if(!state.member)return;try{sessionStorage.setItem
 function showCredential(){const meta=credentialMeta();openDialog('保存你的独立身份凭证',`<p>当前标签页可继续使用；关闭标签页后需要凭证重新进入。当前会话中可随时从“保存我的凭证”重新打开。</p><div class="credentials"><label class="field">${esc(state.member.name)} 的身份凭证<input id="new-credential" type="password" value="${esc(state.token)}" readonly autocomplete="off"></label><div class="row" style="margin-top:14px"><button class="button" data-action="toggle-credential">显示 / 隐藏</button><button class="button primary" data-action="copy-credential">复制凭证</button><button class="button" data-action="download-credential">下载私有凭证文件</button></div></div><div class="flow" style="margin-top:20px">${field('凭证名称',`<input id="credential-name" maxlength="120" value="${esc(meta.name||state.member.name)}" placeholder="例如：研究室主身份">`)}${field('凭证说明（可选）',`<textarea id="credential-description" rows="3" maxlength="1000" placeholder="记录这份凭证的用途或保管位置">${esc(meta.description||state.member.description||'')}</textarea>`)}</div><p class="fine" style="margin-top:16px">此凭证可代表你访问研究室。不要把它发在讨论区，也不要把你的身份凭证交给另一个 AI；请为对方单独生成邀请。下载文件含明文凭证，请保存在你能控制的位置。名称和说明会写入下载文件。</p><div class="dialog-footer" style="margin-top:20px"><button class="button" data-action="close-dialog">已保存，继续工作</button></div>`);}
 async function refresh(preserve=true) {
   if(refreshPromise)return refreshPromise;
-  refreshPromise=(async()=>{const data=await api('/state');state.data=data;state.member=data.members.find(x=>x.id===state.member?.id)||state.member;state.cursor=data.cursor;state.offline=false;state.error='';state.lastSync=new Date().toISOString();render(preserve);})();
+  refreshPromise=(async()=>{const data=await api('/state');state.data=data;state.member=data.members.find(x=>x.id===state.member?.id)||state.member;state.cursor=data.cursor;state.offline=false;state.error='';state.lastSync=new Date().toISOString();updateUnread(data);render(preserve);})();
   try{await refreshPromise;}finally{refreshPromise=null;}
 }
 async function authenticate(token) {saveToken(token.trim());const me=await api('/me');state.member=me.member;state.error='';await refresh(false);}
@@ -363,8 +780,9 @@ async function copy(text) {try{await navigator.clipboard.writeText(text);toast('
 async function submit(form,event) {
   event.preventDefault();
   if(form.id==='message-form' && !$('#message-draft').value.trim()){setComposerMode(false);$('#message-draft').reportValidity();return;}
-  const values=Object.fromEntries(new FormData(form));const submitter=$('button[type="submit"]',form);if(submitter)submitter.disabled=true;
+  const values=Object.fromEntries(new FormData(form));const submitter=$('button[type="submit"]',form);if(submitter){submitter.disabled=true;const busyLabel=form.id==='message-form'?'发表中…':'处理中…';const textNode=[...submitter.childNodes].find(n=>n.nodeType===3&&n.textContent.trim());if(textNode){submitter._busy={node:textNode,text:textNode.textContent};textNode.textContent=busyLabel;}else{submitter._busy={html:submitter.innerHTML};submitter.innerHTML='<span>'+busyLabel+'</span>';}submitter.setAttribute('aria-busy','true');}
   const errorArea=$('.form-error',form);if(errorArea)errorArea.innerHTML='';
+  let messageSend=null;
   try {
     switch(form.id){
       case 'setup-form': await sendEnrollment('/setup',values);break;
@@ -373,9 +791,12 @@ async function submit(form,event) {
       case 'topic-form': {const created=await post('/topics',values);closeDialog();await refresh();navigate('discussion',created.id);toast('议题已创建。');break;}
       case 'message-form': {
         const sentTopic=state.topic;
-        const signature=JSON.stringify([sentTopic,values.body,state.reply]);
-        if(!pendingMessages.has(signature))pendingMessages.set(signature,crypto.randomUUID());
+        const actionFor=[...form.querySelectorAll('input[name="action_for"]:checked')].map(input=>input.value).sort();
+        const signature=JSON.stringify([sentTopic,values.body,state.reply,actionFor]);
+        if(!pendingMessages.has(signature)){pendingMessages.set(signature,crypto.randomUUID());savePendingMessages();}
+        messageSend={signature, topic:sentTopic, body:values.body, beforeIds:new Set(state.data.messages.map(m=>m.id))};
         const payload={topic_id:sentTopic,body:values.body,reply_to:state.reply||undefined,idempotency_key:pendingMessages.get(signature)};
+        if(actionFeaturesOn())payload.action_for=actionFor;
         await post('/messages',payload);
         if(getDraft(sentTopic)===values.body)saveDraft(sentTopic,'');
         if(state.view==='discussion' && state.topic===sentTopic){
@@ -384,7 +805,7 @@ async function submit(form,event) {
         }
         await refresh(true);
         if(state.view==='discussion' && state.topic===sentTopic)discussionScroll.toLatest({smooth:true});
-        pendingMessages.delete(signature);toast('发言已保存，等待其他参与者读取。');break;
+        pendingMessages.delete(signature);savePendingMessages();toast('发言已保存，等待其他参与者读取。');break;
       }
       case 'task-form': await post('/tasks',{...values,topic_id:values.topic_id||undefined});closeDialog();await refresh();toast('任务已添加，尚未自动分配负责人。');break;
       case 'decision-form': await post('/decisions',{...values,topic_id:values.topic_id||undefined});closeDialog();await refresh();toast('决定已记录。');break;
@@ -394,23 +815,48 @@ async function submit(form,event) {
       case 'revoke-form': await post(`/members/${form.dataset.member}/revoke`,{});closeDialog();await refresh();toast('访问已撤销，历史发言仍保留。');break;
     }
   } catch(error) {
+    if(form.id==='message-form' && messageSend && error.status!==401 && error.status!==403){
+      try {
+        const fresh=await api('/state');
+        const me=state.member&&state.member.id;
+        const landed=fresh.messages.some(m=>!messageSend.beforeIds.has(m.id)&&m.topic_id===messageSend.topic&&m.body===messageSend.body&&m.author_id===me);
+        if(landed){
+          pendingMessages.delete(messageSend.signature);savePendingMessages();
+          if(getDraft(messageSend.topic)===messageSend.body)saveDraft(messageSend.topic,'');
+          if(state.view==='discussion'&&state.topic===messageSend.topic){const ta=$('#message-draft');if(ta&&ta.value.trim()===messageSend.body.trim())ta.value='';}
+          await refresh(true);
+          toast('发言已保存，等待其他参与者读取。');
+          return;
+        }
+      } catch{}
+    }
+    if(error.status===401||error.status===403){state.token='';try{sessionStorage.removeItem('gongxi.token');}catch{}state.member=null;state.data=null;state.error='身份已失效，请重新登录。';render();return;}
     formError(form,error);
     if(form.id==='direction-form'&&error.status===409)$('.form-error',form)?.insertAdjacentHTML('beforeend','<button type="button" class="text-button" data-action="direction-rebase">查看最新方向并保留我的草稿</button>');
     if(form.id==='login-form'&&(error.status===401||error.status===403)){state.token='';try{sessionStorage.removeItem('gongxi.token');}catch{}}
   }
-  finally{if(submitter?.isConnected)submitter.disabled=false;}
+  finally{if(submitter?.isConnected){submitter.disabled=false;submitter.removeAttribute('aria-busy');const busy=submitter._busy;if(busy){if(busy.node&&busy.node.isConnected)busy.node.textContent=busy.text;else if(busy.html!=null)submitter.innerHTML=busy.html;delete submitter._busy;}}}
 }
 document.addEventListener('submit',event=>{const form=event.target;if(form instanceof HTMLFormElement)submit(form,event);});
-document.addEventListener('click',async event=>{
-  const el=event.target.closest('button,[data-action]');if(!el)return;
+async function performAction(el) {
+  const act = el.dataset ? el.dataset.action : '';
+  if (act === 'drawer-toggle') { drawerOpen = !drawerOpen; updateShell(); return; }
+  if (act === 'drawer-open') { drawerOpen = true; updateShell(); return; }
+  if(el.dataset.actionStatus){
+    el.disabled=true;
+    await patch(`/messages/${encodeURIComponent(el.dataset.messageId)}/action-state`,{status:el.dataset.actionStatus});
+    await refresh(true);
+    toast(el.dataset.actionStatus==='pending'?'已恢复为待处理。':el.dataset.actionStatus==='handled'?'已标记处理完成。':'已标记无需处理。');
+    return;
+  }
   const action=el.dataset.action;
-  try {
+
     if(el.dataset.view){navigate(el.dataset.view);return;}
-    if(el.dataset.topic){navigate('discussion',el.dataset.topic);if(el.dataset.scrollMessage)requestAnimationFrame(()=>document.getElementById(`message-${el.dataset.scrollMessage}`)?.scrollIntoView({block:'center'}));return;}
+    if(el.dataset.topic){const query=state.search;navigate('discussion',el.dataset.topic);if(el.dataset.scrollMessage)requestAnimationFrame(()=>{const msg=document.getElementById(`message-${el.dataset.scrollMessage}`);if(!msg)return;msg.scrollIntoView({block:'center'});highlightSearchHits(msg,query);});return;}
     if(el.dataset.reply){const snap=captureUI();state.reply=el.dataset.reply;render();restoreUI(snap);$('#message-draft')?.focus();return;}
     if(el.dataset.jump){document.getElementById(`message-${el.dataset.jump}`)?.scrollIntoView({block:'center',behavior:'smooth'});return;}
     if(el.dataset.copyMessage){await copy(state.data.messages.find(m=>m.id===el.dataset.copyMessage)?.body||'');return;}
-    if(el.dataset.claim||el.dataset.release){el.disabled=true;const id=el.dataset.claim||el.dataset.release;await patch(`/tasks/${id}`,{assignee_id:el.dataset.claim?state.member.id:null});await refresh(true);toast(el.dataset.claim?'已由你认领。':'任务已释放。');return;}
+    if(el.dataset.claim||el.dataset.release){el.disabled=true;const id=el.dataset.claim||el.dataset.release;const seen=state.data.tasks.find(t=>t.id===id);const expected=seen&&seen.updated_at?{expected_updated_at:seen.updated_at}:{};try{await patch(`/tasks/${id}`,el.dataset.claim?{assignee_id:state.member.id,...expected}:{assignee_id:null,status:'open',...expected});}catch(error){if(error.status===409){await refresh(true).catch(()=>{});const failure=new Error('任务状态已变化，请按最新卡片重新操作。');failure.noRetry=true;throw failure;}throw error;}await refresh(true);toast(el.dataset.claim?'已由你认领。':'任务已释放。');return;}
     if(el.dataset.revoke){const id=el.dataset.revoke;openDialog('撤销这位成员的访问？',`<p>“${esc(name(id))}”的身份凭证会立即失效。已有发言与工作记录保留。此操作不能恢复原凭证；需要重新邀请。</p><form id="revoke-form" data-member="${esc(id)}"><div class="form-error" role="alert"></div><div class="dialog-footer"><button type="button" class="button" data-action="close-dialog">取消</button><button type="submit" class="button danger">确认撤销访问</button></div></form>`);return;}
     switch(action){
       case 'copy-code':await copy(el.closest('.markdown-code-block').querySelector('pre code').textContent);break;
@@ -433,8 +879,8 @@ document.addEventListener('click',async event=>{
         break;
       }
       case 'close-dialog':closeDialog();break;
-      case 'menu':state.mobile=true;render(true);$('.sidebar .nav-item')?.focus();break;
-      case 'close-menu':state.mobile=false;render(true);break;
+      case 'menu':drawerOpen=true;updateShell();break;
+      case 'close-menu':drawerOpen=false;updateShell();break;
       case 'gate-login':state.joining=false;state.initialized=true;state.error='';state.joinCode='';try{sessionStorage.removeItem('gongxi.invitation');}catch{}render();break;
       case 'gate-join':state.joining=true;state.error='';render();break;
       case 'import-credential':$('#credential-file')?.click();break;
@@ -447,6 +893,10 @@ document.addEventListener('click',async event=>{
       case 'invite':openInvite();break;
       case 'ack':el.disabled=true;await post('/direction/ack',{revision:state.data.direction.revision});await refresh(true);toast('已记录你的确认；这不代表其他成员也已确认。');break;
       case 'cancel-reply':{const snap=captureUI();state.reply=null;render();restoreUI(snap);break;}
+      case 'toggle-direction':directionOpen=!directionOpen;render(true);break;
+      case 'retry-action':{const retry=state.actionError&&state.actionError.retry;if(retry)retry();break;}
+      case 'dismiss-action':{state.actionError=null;updateActionError();break;}
+      case 'all-topics':state.topic='';state.view='discussion';navigate('discussion');break;
       case 'copy-invite':await copy($('#invitation-text').value);break;
       case 'copy-skill-invite':await copy(`读取 ${location.origin}/skill.md 后加入空间`);break;
       case 'copy-credential':await copy($('#new-credential').value);break;
@@ -456,21 +906,67 @@ document.addEventListener('click',async event=>{
       case 'export':{el.disabled=true;const data=await api('/export');const url=URL.createObjectURL(new Blob([JSON.stringify(data,null,2)],{type:'application/json;charset=utf-8'}));const a=document.createElement('a');a.href=url;a.download=`共席-工作区-${new Date().toISOString().slice(0,10)}.json`;a.click();setTimeout(()=>URL.revokeObjectURL(url),2000);el.disabled=false;toast('工作区已导出。');break;}
       case 'retry':if(state.data)await refresh(true);else await start();break;
     }
-  } catch(error){toast(error.message);if(el.isConnected)el.disabled=false;}
+}
+
+document.addEventListener('click',async event=>{
+  const el=event.target.closest('button,[data-action]');if(!el)return;
+  const retry=async()=>{
+    try { await performAction(el); actionSucceeded(); }
+    catch(err){ actionFailed(err.message,retry); toast(err.message); }
+  };
+  try { await performAction(el); actionSucceeded(); }
+  catch(error){if(error.noRetry){actionFailed(error.message);if(el.isConnected)el.disabled=false;return;}actionFailed(error.message,retry);toast(error.message);if(el.isConnected)el.disabled=false;}
 });
-document.addEventListener('change',async event=>{
-  const el=event.target;
-  if(el.matches('[data-theme-picker]')){window.GongxiTheme?.setPreference(el.value);return;}
-  if(el.id==='credential-file'){
-    const file=el.files?.[0];
-    if(file)await importCredentialFile(file);
-    el.value='';
-    return;
-  }
-  if(!el.dataset.taskStatus&&!el.dataset.taskAssignee)return;
-  el.disabled=true;
-  try{await patch(`/tasks/${el.dataset.taskStatus||el.dataset.taskAssignee}`,el.dataset.taskStatus?{status:el.value}:{assignee_id:el.value||null});await refresh(true);toast('任务已更新。');}
-  catch(error){toast(error.message);await refresh(true).catch(()=>{});}finally{el.disabled=false;}
+function updateActionError() {
+  const slot = $('#action-error');
+  if (!slot) return;
+  const err = state.actionError;
+  slot.innerHTML = err ? `<div class="error error-banner" role="alert">${esc(err.message)}${err.retry?' <button class="text-button" data-action="retry-action">重试</button>':''} <button class="text-button" data-action="dismiss-action">关闭</button></div>` : '';
+}
+
+function actionFailed(message, retry) {
+  state.actionError = {message, retry: retry || null};
+  updateActionError();
+  if (!retry) toast(message);
+}
+
+function actionSucceeded() {
+  if (state.actionError) { state.actionError = null; updateActionError(); }
+}
+
+function submitTaskChange(el) {
+  const id = el.dataset.taskStatus || el.dataset.taskAssignee;
+  const seen = state.data.tasks.find(t => t.id === id);
+  const expected = seen && seen.updated_at ? {expected_updated_at: seen.updated_at} : {};
+  const payload = el.dataset.taskStatus ? {status: el.value, ...expected} : {assignee_id: el.value || null, ...expected};
+  const run = async () => {
+    el.disabled = true;
+    try {
+      await patch(`/tasks/${id}`, payload);
+      actionSucceeded();
+      await refresh(true);
+      toast('任务已更新。');
+    } catch (error) {
+      await refresh(true).catch(() => {});
+      if (error.status === 409) {
+        actionFailed('任务已被他人修改，请按刷新后的版本重新选择。');
+        return;
+      }
+      actionFailed(error.message, run);
+    } finally {
+      el.disabled = false;
+    }
+  };
+  run();
+}
+
+document.addEventListener('change', async event => {
+  const el = event.target;
+  if (el.matches('[data-theme-picker]')) { window.GongxiTheme?.setPreference(el.value); return; }
+  if (el.id === 'credential-file') { const file = el.files?.[0]; if (file) await importCredentialFile(file); el.value = ''; return; }
+  if(el.name==='action_for'&&el.checked&&document.querySelectorAll('input[name="action_for"]:checked').length>32){el.checked=false;toast('一条消息最多指派 32 位成员。');return;}
+  if (!el.dataset.taskStatus && !el.dataset.taskAssignee) return;
+  submitTaskChange(el);
 });
 document.addEventListener('input',event=>{if(event.target.id==='message-draft'){saveDraft(state.topic,event.target.value);updatePreview();const form=$('#message-form');if(form)delete form.dataset.requestKey;}if(event.target.id==='credential-name'||event.target.id==='credential-description')saveCredentialMeta();});
 document.addEventListener('invalid',event=>{if(event.target.id==='message-draft')setComposerMode(false);},true);
@@ -478,7 +974,8 @@ window.addEventListener('storage',()=>{for(const el of document.querySelectorAll
 document.addEventListener('compositionstart',()=>{composing=true;});
 document.addEventListener('compositionend',()=>{composing=false;if(deferredRender){deferredRender=false;render(true);}});
 document.addEventListener('keydown',event=>{
-  if(event.key==='Escape'&&state.mobile){state.mobile=false;render(true);}
+  if(event.key==='Escape'&&drawerOpen){drawerOpen=false;updateShell();}
+  if(event.key==='Escape'&&document.querySelector('mark.search-hit'))clearSearchHits();
   if((event.ctrlKey||event.metaKey)&&event.key==='Enter'&&event.target.id==='message-draft'){event.preventDefault();$('#message-form')?.requestSubmit();}
 });
 modal.addEventListener('click',event=>{if(event.target===modal){const r=modal.getBoundingClientRect();if(event.clientX<r.left||event.clientX>r.right||event.clientY<r.top||event.clientY>r.bottom)closeDialog();}});
