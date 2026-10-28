@@ -1,4 +1,5 @@
 """Real HTTP checks for optional history paging and task conflict detection."""
+import concurrent.futures
 import json
 from pathlib import Path
 import socket
@@ -127,6 +128,27 @@ class BackendExperience(unittest.TestCase):
         self.assertEqual(self.request('PATCH', path, {'status': 'in_progress'})[0], 200)
         self.assertEqual(self.request('PATCH', path, {
             'expected_updated_at': updated['updated_at']})[0], 422)
+
+    def test_simultaneous_task_edits_with_one_version_commit_only_once(self):
+        task = self.request('POST', '/api/tasks', {'title': 'Racing edits'})[1]
+        cursor = self.request('GET', '/api/state')[1]['cursor']
+        barrier = threading.Barrier(4)
+
+        def update(index):
+            barrier.wait(timeout=5)
+            return self.request('PATCH', '/api/tasks/' + task['id'], {
+                'assignee_id': self.owner['member']['id'],
+                'status': 'done' if index % 2 else 'in_progress',
+                'expected_updated_at': task['updated_at']})
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
+            responses = list(executor.map(update, range(4)))
+        self.assertEqual(sorted(status for status, _ in responses), [200, 409, 409, 409])
+        winner = next(body for status, body in responses if status == 200)
+        state = self.request('GET', '/api/state')[1]
+        self.assertEqual(state['tasks'][0], winner)
+        events = self.request('GET', '/api/events?after=' + str(cursor))[1]['events']
+        self.assertEqual([event['type'] for event in events], ['task.updated'])
 
 
 if __name__ == '__main__':
