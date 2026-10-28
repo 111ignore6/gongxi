@@ -128,7 +128,7 @@ async function submit(e) {
   e.preventDefault();
   const form = e.target; const ta = form.querySelector('textarea'); const body = ta.value.trim();
   if (!body) return;
-  const key = (state.pending && state.pending.body === body) ? state.pending.key : 'doc-' + crypto.randomUUID();
+  const key = (state.pending && state.pending.body === body && state.pending.topicId === state.topicId) ? state.pending.key : 'doc-' + crypto.randomUUID();
   state.pending = {key: key, body: body, topicId: state.topicId};
   const btn = form.querySelector('.pub');
   const old = form.querySelector('.error'); if (old) old.remove();

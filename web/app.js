@@ -506,6 +506,9 @@ function currentDrafts(){try{const prefix=draftPrefix();const entries=Array.from
 function formatDrafts(entries){return entries.map(({title,body})=>`议题：${title}\n\n${body}`).join('\n\n────────\n\n');}
 function clearOwnDrafts(){try{const prefix=draftPrefix();Array.from({length:sessionStorage.length},(_,i)=>sessionStorage.key(i)).filter(k=>k?.startsWith(prefix)).forEach(k=>sessionStorage.removeItem(k));}catch{}}
 const pendingMessages=new Map();
+function savePendingMessages(){try{sessionStorage.setItem('gongxi.pendingMessages',JSON.stringify([...pendingMessages]));}catch{}}
+function loadPendingMessages(){try{const raw=sessionStorage.getItem('gongxi.pendingMessages');if(raw)for(const pair of JSON.parse(raw))pendingMessages.set(pair[0],pair[1]);}catch{}}
+loadPendingMessages();
 function openDialog(title, body) {
   savedFocus=document.activeElement;
   modal.innerHTML=`<header class="dialog-header"><h2 id="dialog-title">${esc(title)}</h2><button class="icon-button" data-action="close-dialog" aria-label="关闭对话框">${icon('close')}</button></header><div class="dialog-body">${body}</div>`;
@@ -634,6 +637,7 @@ async function submit(form,event) {
   if(form.id==='message-form' && !$('#message-draft').value.trim()){setComposerMode(false);$('#message-draft').reportValidity();return;}
   const values=Object.fromEntries(new FormData(form));const submitter=$('button[type="submit"]',form);if(submitter){submitter.disabled=true;const busyLabel=form.id==='message-form'?'发表中…':'处理中…';const textNode=[...submitter.childNodes].find(n=>n.nodeType===3&&n.textContent.trim());if(textNode){submitter._busy={node:textNode,text:textNode.textContent};textNode.textContent=busyLabel;}else{submitter._busy={html:submitter.innerHTML};submitter.innerHTML='<span>'+busyLabel+'</span>';}submitter.setAttribute('aria-busy','true');}
   const errorArea=$('.form-error',form);if(errorArea)errorArea.innerHTML='';
+  let messageSend=null;
   try {
     switch(form.id){
       case 'setup-form': await sendEnrollment('/setup',values);break;
@@ -643,7 +647,8 @@ async function submit(form,event) {
       case 'message-form': {
         const sentTopic=state.topic;
         const signature=JSON.stringify([sentTopic,values.body,state.reply]);
-        if(!pendingMessages.has(signature))pendingMessages.set(signature,crypto.randomUUID());
+        if(!pendingMessages.has(signature)){pendingMessages.set(signature,crypto.randomUUID());savePendingMessages();}
+        messageSend={signature, topic:sentTopic, body:values.body, beforeIds:new Set(state.data.messages.map(m=>m.id))};
         const payload={topic_id:sentTopic,body:values.body,reply_to:state.reply||undefined,idempotency_key:pendingMessages.get(signature)};
         await post('/messages',payload);
         if(getDraft(sentTopic)===values.body)saveDraft(sentTopic,'');
@@ -653,7 +658,7 @@ async function submit(form,event) {
         }
         await refresh(true);
         if(state.view==='discussion' && state.topic===sentTopic)discussionScroll.toLatest({smooth:true});
-        pendingMessages.delete(signature);toast('发言已保存，等待其他参与者读取。');break;
+        pendingMessages.delete(signature);savePendingMessages();toast('发言已保存，等待其他参与者读取。');break;
       }
       case 'task-form': await post('/tasks',{...values,topic_id:values.topic_id||undefined});closeDialog();await refresh();toast('任务已添加，尚未自动分配负责人。');break;
       case 'decision-form': await post('/decisions',{...values,topic_id:values.topic_id||undefined});closeDialog();await refresh();toast('决定已记录。');break;
@@ -663,6 +668,22 @@ async function submit(form,event) {
       case 'revoke-form': await post(`/members/${form.dataset.member}/revoke`,{});closeDialog();await refresh();toast('访问已撤销，历史发言仍保留。');break;
     }
   } catch(error) {
+    if(form.id==='message-form' && messageSend && error.status!==401 && error.status!==403){
+      try {
+        const fresh=await api('/state');
+        const me=state.member&&state.member.id;
+        const landed=fresh.messages.some(m=>!messageSend.beforeIds.has(m.id)&&m.topic_id===messageSend.topic&&m.body===messageSend.body&&m.author_id===me);
+        if(landed){
+          pendingMessages.delete(messageSend.signature);savePendingMessages();
+          if(getDraft(messageSend.topic)===messageSend.body)saveDraft(messageSend.topic,'');
+          if(state.view==='discussion'&&state.topic===messageSend.topic){const ta=$('#message-draft');if(ta&&ta.value.trim()===messageSend.body.trim())ta.value='';}
+          await refresh(true);
+          toast('发言已保存，等待其他参与者读取。');
+          return;
+        }
+      } catch{}
+    }
+    if(error.status===401||error.status===403){state.token='';try{sessionStorage.removeItem('gongxi.token');}catch{}state.member=null;state.data=null;state.error='身份已失效，请重新登录。';render();return;}
     formError(form,error);
     if(form.id==='direction-form'&&error.status===409)$('.form-error',form)?.insertAdjacentHTML('beforeend','<button type="button" class="text-button" data-action="direction-rebase">查看最新方向并保留我的草稿</button>');
     if(form.id==='login-form'&&(error.status===401||error.status===403)){state.token='';try{sessionStorage.removeItem('gongxi.token');}catch{}}
