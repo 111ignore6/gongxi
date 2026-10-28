@@ -220,7 +220,7 @@ function stripHTML(d) {
 function drawerHTML(d) {
   const openTasks = d.tasks.filter(t => t.status !== 'done').length;
   const active = d.members.filter(m => !m.revoked_at).length;
-  return `<span>任务 <b>${openTasks}</b></span><span>决定 <b>${d.decisions.length}</b></span><span>参与者 <b>${active}</b></span><span>上次同步 <b>${date(state.lastSync)}</b></span>
+  return `<span>任务 <b>${openTasks}</b></span><span>决定 <b>${d.decisions.length}</b></span><span>参与者 <b>${active}</b></span><span class="sync-line">上次同步 <b>${date(state.lastSync)}</b></span>
     <button class="drawer-toggle" data-action="drawer-toggle" aria-expanded="${drawerOpen}" aria-controls="drawer-panel">${drawerOpen?'收起索引 ↓':'展开索引 ↑'}</button>`;
 }
 

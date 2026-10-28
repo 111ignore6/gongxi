@@ -38,6 +38,13 @@ html,body{height:100%;overflow:hidden}
 .drawer-panel h3:first-child{margin-top:0}
 .drawer-panel .rowline{line-height:2;color:var(--ink-2)}
 .topicstrip{display:none}
+
+@media(max-width:980px){
+  .topbar .brand strong,.topbar .brand small{display:none}
+  .topbar .tools .button{display:none}
+  .drawer .sync-line{display:none}
+  .topbar .tools{gap:4px}
+}
 @media(max-width:980px){
   .docbody{grid-template-columns:1fr}
   .docindex{display:none}
