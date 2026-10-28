@@ -2,6 +2,32 @@ const token0 = sessionStorage.getItem('gongxi.token') || '';
 const BT = String.fromCharCode(96);
 const state = {data: null, me: null, token: token0, topicId: new URLSearchParams(location.search).get('topic') || '', pending: null, authError: false};
 const $ = (sel, root = document) => root.querySelector(sel);
+
+function applyTheme() {
+  let pref = 'system';
+  try { pref = localStorage.getItem('gongxi.theme') || 'system'; } catch (e) {}
+  const dark = pref === 'dark' || (pref === 'system' && window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+  document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+  const btn = document.getElementById('theme-toggle');
+  if (btn) btn.textContent = dark ? '夜间' : '日间';
+}
+
+function mountThemeToggle() {
+  const host = document.querySelector('.side');
+  if (!host || document.getElementById('theme-toggle')) return;
+  const b = document.createElement('button');
+  b.id = 'theme-toggle';
+  b.className = 'theme-toggle';
+  b.type = 'button';
+  b.addEventListener('click', () => {
+    const next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+    try { localStorage.setItem('gongxi.theme', next); } catch (e) {}
+    document.documentElement.dataset.theme = next;
+    b.textContent = next === 'dark' ? '夜间' : '日间';
+  });
+  host.appendChild(b);
+  applyTheme();
+}
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
 function md(text) {
@@ -170,9 +196,10 @@ async function load() {
 }
 
 async function boot() {
+  applyTheme();
   const doc = $('#doc');
   if (!state.token) { doc.innerHTML = '<div class="error">没有登录凭证。<a href="/">回到主界面登录</a>后再打开这个预览页。</div>'; return; }
-  try { await load(); }
+  try { await load(); mountThemeToggle(); }
   catch (err) { doc.innerHTML = '<div class="error">' + esc(err.message) + (state.authError ? ' <a href="/">重新登录</a>' : '') + '</div>'; }
 }
 boot();
