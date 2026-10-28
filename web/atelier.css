@@ -122,3 +122,13 @@ dialog{border-radius:3px}
   .composer{margin:18px 14px 26px}
   .direction-banner{margin:16px 18px 0}
 }
+
+
+/* typographic balance: avoid a single-character last line on narrow screens */
+.page-heading h1,.thread-heading h1,.hero h2,.empty h2{text-wrap:balance}
+
+@media(max-width:760px){
+  .task-actions{gap:8px}
+  .task-actions label{display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
+  .task-actions select{max-width:100%}
+}
