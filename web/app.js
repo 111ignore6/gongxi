@@ -140,6 +140,7 @@ function nav() {
   return Object.entries(views).filter(([k])=>k!=='search').map(([key,[label,ico]]) => `<button class="nav-item ${state.view === key ? 'active' : ''}" data-view="${key}" ${state.view === key ? 'aria-current="page"' : ''}>${icon(ico)}${label}</button>`).join('');
 }
 let shell = null;
+let directionOpen = false;
 let discussionView = null;
 const messageNodes = new Map();
 
@@ -170,25 +171,48 @@ function mountShell() {
   messageNodes.clear();
 }
 
+function shellTopicListHTML(d) {
+  return d.topics.slice(-6).reverse().map(t=>`<button class="topic-link ${state.view==='discussion'&&state.topic===t.id?'selected':''}" data-topic="${esc(t.id)}">${esc(t.title)}</button>`).join('') || '<p class="fine" style="padding:0 12px">还没有议题。为第一种看法，写一个开头。</p>';
+}
+
 function updateShell() {
   const d = state.data;
+  const active = document.activeElement;
+  const focusSel = active && app.contains(active) && active.dataset
+    ? (active.dataset.topic ? `[data-topic="${CSS.escape(active.dataset.topic)}"]`
+      : active.dataset.view ? `[data-view="${CSS.escape(active.dataset.view)}"]`
+      : active.dataset.action ? `[data-action="${CSS.escape(active.dataset.action)}"]` : null)
+    : null;
+
   shell.scrim.classList.toggle('open', Boolean(state.mobile));
   shell.sidebar.classList.toggle('open', Boolean(state.mobile));
   shell.menuButton.setAttribute('aria-expanded', String(Boolean(state.mobile)));
-  shell.spaceName.innerHTML = `<strong>${esc(d.workspace.name)}</strong><small>独立协作空间 · ${d.members.filter(m=>!m.revoked_at).length} 位成员</small>`;
-  shell.nav.innerHTML = nav();
-  shell.topicList.innerHTML = d.topics.slice(-6).reverse().map(t=>`<button class="topic-link ${state.view==='discussion'&&state.topic===t.id?'selected':''}" data-topic="${esc(t.id)}">${esc(t.title)}</button>`).join('') || '<p class="fine" style="padding:0 12px">还没有议题。为第一种看法，写一个开头。</p>';
+
+  setRegion(shell.spaceName, `<strong>${esc(d.workspace.name)}</strong><small>独立协作空间 · ${d.members.filter(m=>!m.revoked_at).length} 位成员</small>`, d.workspace.name + '|' + d.members.filter(m=>!m.revoked_at).length);
+  setRegion(shell.nav, nav(), state.view);
+  setRegion(shell.topicList, shellTopicListHTML(d), state.view + '|' + state.topic + '|' + d.topics.map(t => t.id + ':' + t.title).join('|'));
+  setRegion(shell.user, `${avatar(state.member)}<div><strong>${esc(state.member.name)}</strong><small>${owner()?'人类 · 组织者':state.member.kind==='ai'?'AI · 参与者':'人类 · 参与者'}</small></div><button class="icon-button" data-action="logout" aria-label="退出当前身份">${icon('exit')}</button>`, [state.member.name, state.member.kind, state.member.role].join('|'));
+  setRegion(shell.breadcrumb, `研究室<span>/</span>${views[state.view]?.[0]||'研究室'}`, state.view);
+  setRegion(shell.errorSlot, state.error ? `<div class="error error-banner" role="alert">${esc(state.error)} <button class="text-button" data-action="retry">重试</button></div>` : '', String(state.error));
   shell.connection.innerHTML = state.offline ? '连接暂时中断 · 自动重试中' : `上次同步 ${date(state.lastSync)}<br>每 5 秒检查更新，不代表 AI 在线`;
   shell.signal.classList.toggle('offline', Boolean(state.offline));
-  shell.user.innerHTML = `${avatar(state.member)}<div><strong>${esc(state.member.name)}</strong><small>${owner()?'人类 · 组织者':state.member.kind==='ai'?'AI · 参与者':'人类 · 参与者'}</small></div><button class="icon-button" data-action="logout" aria-label="退出当前身份">${icon('exit')}</button>`;
-  shell.breadcrumb.innerHTML = `研究室<span>/</span>${views[state.view]?.[0]||'研究室'}`;
-  shell.errorSlot.innerHTML = state.error ? `<div class="error error-banner" role="alert">${esc(state.error)} <button class="text-button" data-action="retry">重试</button></div>` : '';
+
+  if (focusSel && !app.contains(document.activeElement)) {
+    const target = app.querySelector(focusSel);
+    if (target) target.focus({preventScroll: true});
+  }
 }
 
 function updatePage() {
   if (state.view === 'discussion') { updateDiscussion(); return; }
   if (discussionView) { discussionView = null; messageNodes.clear(); }
   shell.main.innerHTML = pageContent();
+}
+
+function setRegion(node, html, key) {
+  if (!node || node.dataset.regionKey === key) return;
+  node.dataset.regionKey = key;
+  node.innerHTML = html;
 }
 
 function threadHeadingHTML(t, count) {
@@ -202,11 +226,18 @@ function replyBarHTML() {
 }
 
 function contextRailHTML(tasks, ds) {
-  return `<section class="rail-section"><div class="eyebrow">SHARED NOTEBOOK</div><h3 style="margin-top:14px">每一次改变，<br>都能找到它的来处。</h3><p>讨论留在这里，工作由成员在自己的环境里继续。</p></section><section class="rail-section"><h2>这个议题的决定</h2>${ds.length?ds.map(x=>`<div class="rail-entry">${esc(x.title)}<small>${date(x.created_at)} · 方向 v${x.direction_revision}</small></div>`).join(''):'<p>尚未记录决定。观点一致不自动等于共同决定。</p>'}${owner()?button('记录决定','new-decision'):''}</section><section class="rail-section"><h2>接下来</h2>${tasks.length?tasks.map(x=>`<div class="rail-entry">${esc(x.title)}<small>${esc(taskStatus(x.status))} · ${x.assignee_id?esc(name(x.assignee_id)):'暂无负责人'}</small></div>`).join(''):'<p>尚未拆成任务。</p>'}${button('添加任务','new-task')}</section><p class="fine">来源身份由参与者声明。最近读取时间不表示正在思考。</p>`;
+  const shownDs = ds.slice(-3);
+  const shownTasks = tasks.slice(-3);
+  return `<section class="rail-section"><div class="eyebrow">SHARED NOTEBOOK</div><h3 style="margin-top:14px">每一次改变，<br>都能找到它的来处。</h3><p>讨论留在这里，工作由成员在自己的环境里继续。</p></section><section class="rail-section"><h2>这个议题的决定</h2>${shownDs.length?shownDs.map(x=>`<div class="rail-entry">${esc(x.title)}<small>${date(x.created_at)} · 方向 v${x.direction_revision}</small></div>`).join(''):'<p>尚未记录决定。观点一致不自动等于共同决定。</p>'}${ds.length>3?`<button class="text-button" data-view="decisions">查看全部 ${ds.length} 条决定 →</button>`:''}${owner()?button('记录决定','new-decision'):''}</section><section class="rail-section"><h2>接下来</h2>${shownTasks.length?shownTasks.map(x=>`<div class="rail-entry">${esc(x.title)}<small>${esc(taskStatus(x.status))} · ${x.assignee_id?esc(name(x.assignee_id)):'暂无负责人'}</small></div>`).join(''):'<p>尚未拆成任务。</p>'}${tasks.length>3?`<button class="text-button" data-view="plan">查看全部 ${tasks.length} 个任务 →</button>`:''}${button('添加任务','new-task')}</section><p class="fine">来源身份由参与者声明。最近读取时间不表示正在思考。</p>`;
 }
 
 function discussionSkeleton(t) {
   return `<div class="discussion"><section class="thread"><header class="thread-heading" id="thread-heading"></header><div id="direction-slot"></div><div class="messages" id="message-list"></div><form id="message-form" class="composer"><div id="reply-slot"></div><div class="composer-tools"><div class="composer-tabs" role="group" aria-label="编辑模式"><button type="button" data-action="compose-edit" aria-pressed="${!previewing}" class="${!previewing?'active':''}">编辑</button><button type="button" data-action="compose-preview" aria-pressed="${previewing}" class="${previewing?'active':''}">预览</button></div><span class="fine">支持 Markdown · Ctrl / ⌘ + Enter 发表</span></div><label class="field" ${previewing?'hidden':''}><span class="sr-only">发表你的看法</span><textarea id="message-draft" name="body" placeholder="提出看法、追问，或带来新的依据…" required maxlength="20000">${esc(getDraft(t.id))}</textarea></label><div id="message-preview" class="composer-preview markdown-body" ${!previewing?'hidden':''} aria-label="发言预览"></div><div class="form-error" role="alert"></div><footer class="composer-foot"><span>以 ${esc(state.member.name)} 发言<br>发出消息不代表其他 AI 已读取或回应</span><button class="button primary" type="submit">发表 ${icon('arrow')}</button></footer></form></section><aside class="context-rail" id="context-rail"></aside></div>`;
+}
+
+function authorSignature(id) {
+  const a = member(id);
+  return [a.name || '', a.kind || '', a.role || '', a.revoked_at ? '1' : '0'].join('|');
 }
 
 function diffMessages(messages) {
@@ -224,8 +255,13 @@ function diffMessages(messages) {
       const holder = document.createElement('div');
       holder.innerHTML = messageEntry(m);
       el = holder.firstElementChild;
+      el.dataset.authorSig = authorSignature(m.author_id);
       messageNodes.set(m.id, el);
       if (cursor && cursor.nextSibling) list.insertBefore(el, cursor.nextSibling); else list.appendChild(el);
+    }
+    else if (el.dataset.authorSig !== authorSignature(m.author_id)) {
+      el.dataset.authorSig = authorSignature(m.author_id);
+      el.innerHTML = messageEntry(m);
     }
     cursor = el;
   }
@@ -255,10 +291,11 @@ function updateDiscussion() {
   const tasks = state.data.tasks.filter(x => x.topic_id === t.id);
   const ds = state.data.decisions.filter(x => x.topic_id === t.id);
   discussionView.heading.innerHTML = threadHeadingHTML(t, messages.length);
-  discussionView.banner.innerHTML = directionBanner();
+  setRegion(discussionView.banner, directionBanner(), 'v' + state.data.direction.revision + '|' + acked() + '|' + ackCount() + '|' + directionOpen);
   diffMessages(messages);
   discussionView.replySlot.innerHTML = replyBarHTML();
-  discussionView.rail.innerHTML = contextRailHTML(tasks, ds);
+  applyComposerMode();
+  setRegion(discussionView.rail, contextRailHTML(tasks, ds), tasks.map(x => x.id + x.status + (x.assignee_id || '')).join(',') + '|' + ds.map(x => x.id).join(',') + '|' + owner());
 }
 function heading(eyebrow,title,description,action='') { return `<div class="page-heading"><div><div class="eyebrow">${esc(eyebrow)}</div><h1>${esc(title)}</h1><p>${esc(description)}</p></div>${action}</div>`; }
 function pageContent() {
@@ -276,7 +313,12 @@ function acked() {return state.data.acknowledgements.some(a=>a.member_id===state
 function directionBanner() {
   const d=state.data.direction;
   if (!d.revision) return '';
-  return `<aside class="direction-banner" aria-label="共同方向"><strong>共同方向 v${d.revision} · ${acked()?'你已明确确认':'等待你阅读与确认'}</strong><p>${esc(d.body)}</p><div class="row"><span class="fine">${ackCount()} 位成员已确认；不表示已执行或可以远程中止。</span>${!acked()?button('我已阅读并确认','ack'):''}</div></aside>`;
+  const confirmed=acked();
+  const count=ackCount();
+  if (confirmed && !directionOpen) {
+    return `<aside class="direction-banner compact" aria-label="共同方向"><strong>共同方向 v${d.revision} · 你已明确确认</strong><span class="fine">${count} 位成员已确认</span><button class="text-button" data-action="toggle-direction" aria-expanded="false">展开全文</button></aside>`;
+  }
+  return `<aside class="direction-banner" aria-label="共同方向"><strong>共同方向 v${d.revision} · ${confirmed?'你已明确确认':'等待你阅读并确认'}</strong><p>${esc(d.body)}</p><div class="row"><span class="fine">${count} 位成员已确认；不表示已执行或可以远程中止。</span>${!confirmed?button('我已阅读并确认','ack'):'<button class="text-button" data-action="toggle-direction" aria-expanded="true">收起</button>'}</div></aside>`;
 }
 function discussion() {
   const t=topic();
@@ -320,16 +362,24 @@ function updatePreview() {
   const preview=$('#message-preview');
   if(preview && previewing) preview.innerHTML=renderMarkdown($('#message-draft')?.value||'');
 }
+function applyComposerMode() {
+  const draft = $('#message-draft');
+  const preview = $('#message-preview');
+  if (!draft || !preview) return;
+  draft.closest('label').hidden = previewing;
+  preview.hidden = !previewing;
+  for (const el of document.querySelectorAll('.composer-tabs button')) {
+    const active = (el.dataset.action === 'compose-preview') === previewing;
+    el.setAttribute('aria-pressed', String(active));
+    el.classList.toggle('active', active);
+  }
+}
+
 function setComposerMode(preview) {
   const draft=$('#message-draft');
   if(!draft) return;
   previewing=preview;
-  draft.closest('label').hidden=preview;
-  $('#message-preview').hidden=!preview;
-  for(const el of document.querySelectorAll('.composer-tabs button')) {
-    const active=(el.dataset.action==='compose-preview')===preview;
-    el.setAttribute('aria-pressed',String(active));el.classList.toggle('active',active);
-  }
+  applyComposerMode();
   updatePreview();
   if(!preview) draft.focus({preventScroll:true});
 }
@@ -566,6 +616,7 @@ document.addEventListener('click',async event=>{
       case 'invite':openInvite();break;
       case 'ack':el.disabled=true;await post('/direction/ack',{revision:state.data.direction.revision});await refresh(true);toast('已记录你的确认；这不代表其他成员也已确认。');break;
       case 'cancel-reply':{const snap=captureUI();state.reply=null;render();restoreUI(snap);break;}
+      case 'toggle-direction':directionOpen=!directionOpen;render(true);break;
       case 'copy-invite':await copy($('#invitation-text').value);break;
       case 'copy-skill-invite':await copy(`读取 ${location.origin}/skill.md 后加入空间`);break;
       case 'copy-credential':await copy($('#new-credential').value);break;
