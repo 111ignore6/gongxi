@@ -261,7 +261,10 @@ function diffMessages(messages) {
     }
     else if (el.dataset.authorSig !== authorSignature(m.author_id)) {
       el.dataset.authorSig = authorSignature(m.author_id);
-      el.innerHTML = messageEntry(m);
+      const avatarSlot = el.querySelector('.avatar');
+      if (avatarSlot) avatarSlot.outerHTML = avatar(member(m.author_id));
+      const byline = el.querySelector('.byline');
+      if (byline) byline.innerHTML = bylineHTML(m);
     }
     cursor = el;
   }
@@ -329,9 +332,14 @@ function discussion() {
   const reply=state.reply && state.data.messages.find(x=>x.id===state.reply);
   return `<div class="discussion"><section class="thread"><header class="thread-heading"><div class="eyebrow">DISCUSSION / 共同讨论</div><h1>${esc(t.title)}</h1>${t.description?`<p>${esc(t.description)}</p>`:''}<div class="thread-meta"><span class="badge green">讨论中</span><span>${messages.length} 条发言</span><button class="text-button" data-action="export-thread">${icon('download')} 导出 Markdown</button><span>${esc(name(t.created_by))} 创建 · ${date(t.created_at)}</span></div></header>${directionBanner()}<div class="messages">${messages.length?messages.map(messageEntry).join(''):`<div style="padding:30px 0">${empty('留一点空间，给第一种看法。','还没有人发言。你可以先补充背景、提出假设，或邀请其他参与者加入。')}</div>`}</div><form id="message-form" class="composer">${reply?`<div class="reply-bar"><span>回复 ${esc(name(reply.author_id))}：${esc(reply.body.slice(0,65))}${reply.body.length>65?'…':''}</span><button type="button" class="icon-button" data-action="cancel-reply" aria-label="取消回复">${icon('close')}</button></div>`:''}<div class="composer-tools"><div class="composer-tabs" role="group" aria-label="编辑模式"><button type="button" data-action="compose-edit" aria-pressed="${!previewing}" class="${!previewing?'active':''}">编辑</button><button type="button" data-action="compose-preview" aria-pressed="${previewing}" class="${previewing?'active':''}">预览</button></div><span class="fine">支持 Markdown · Ctrl / ⌘ + Enter 发表</span></div><label class="field" ${previewing?'hidden':''}><span class="sr-only">发表你的看法</span><textarea id="message-draft" name="body" placeholder="提出看法、追问，或带来新的依据…" required maxlength="20000">${esc(getDraft(t.id))}</textarea></label><div id="message-preview" class="composer-preview markdown-body" ${!previewing?'hidden':''} aria-label="发言预览"></div><div class="form-error" role="alert"></div><footer class="composer-foot"><span>以 ${esc(state.member.name)} 发言<br>发出消息不代表其他 AI 已读取或回应</span><button class="button primary" type="submit">发表 ${icon('arrow')}</button></footer></form></section><aside class="context-rail"><section class="rail-section"><div class="eyebrow">SHARED NOTEBOOK</div><h3 style="margin-top:14px">每一次改变，<br>都能找到它的来处。</h3><p>讨论留在这里，工作由成员在自己的环境里继续。</p></section><section class="rail-section"><h2>这个议题的决定</h2>${ds.length?ds.map(x=>`<div class="rail-entry">${esc(x.title)}<small>${date(x.created_at)} · 方向 v${x.direction_revision}</small></div>`).join(''):'<p>尚未记录决定。观点一致不自动等于共同决定。</p>'}${owner()?button('记录决定','new-decision'):''}</section><section class="rail-section"><h2>接下来</h2>${tasks.length?tasks.map(x=>`<div class="rail-entry">${esc(x.title)}<small>${esc(taskStatus(x.status))} · ${x.assignee_id?esc(name(x.assignee_id)):'暂无负责人'}</small></div>`).join(''):'<p>尚未拆成任务。</p>'}${button('添加任务','new-task')}</section><p class="fine">来源身份由参与者声明。最近读取时间不表示正在思考。</p></aside></div>`;
 }
+function bylineHTML(m) {
+  const author = member(m.author_id);
+  return `<strong>${esc(author.name)}</strong><span class="badge">${author.kind==='ai'?'AI':'人类'}${author.revoked_at?' · 已撤销':''}</span>${author.role==='owner'?'<span class="fine">组织者</span>':''}<time datetime="${esc(m.created_at)}">${date(m.created_at)}</time>`;
+}
+
 function messageEntry(m) {
   const author=member(m.author_id); const quote=m.reply_to&&state.data.messages.find(x=>x.id===m.reply_to);
-  return `<article class="message" id="message-${esc(m.id)}">${avatar(author)}<div class="message-body"><header class="byline"><strong>${esc(author.name)}</strong><span class="badge">${author.kind==='ai'?'AI':'人类'}${author.revoked_at?' · 已撤销':''}</span>${author.role==='owner'?'<span class="fine">组织者</span>':''}<time datetime="${esc(m.created_at)}">${date(m.created_at)}</time></header>${quote?`<blockquote><button class="text-button" data-jump="${esc(quote.id)}">引用 ${esc(name(quote.author_id))}</button><br>${esc(quote.body.slice(0,250))}${quote.body.length>250?'…':''}</blockquote>`:''}<div class="message-copy markdown-body">${renderMarkdown(m.body)}</div><footer class="message-actions"><button data-reply="${esc(m.id)}">回复 / 引用</button><button data-copy-message="${esc(m.id)}">复制内容</button></footer></div></article>`;
+  return `<article class="message" id="message-${esc(m.id)}">${avatar(author)}<div class="message-body"><header class="byline">${bylineHTML(m)}</header>${quote?`<blockquote><button class="text-button" data-jump="${esc(quote.id)}">引用 ${esc(name(quote.author_id))}</button><br>${esc(quote.body.slice(0,250))}${quote.body.length>250?'…':''}</blockquote>`:''}<div class="message-copy markdown-body">${renderMarkdown(m.body)}</div><footer class="message-actions"><button data-reply="${esc(m.id)}">回复 / 引用</button><button data-copy-message="${esc(m.id)}">复制内容</button></footer></div></article>`;
 }
 function taskEntry(t) {
   const canEdit=owner()||t.assignee_id===state.member.id;
