@@ -636,10 +636,9 @@ async function submit(form,event) {
   finally{if(submitter?.isConnected)submitter.disabled=false;}
 }
 document.addEventListener('submit',event=>{const form=event.target;if(form instanceof HTMLFormElement)submit(form,event);});
-document.addEventListener('click',async event=>{
-  const el=event.target.closest('button,[data-action]');if(!el)return;
+async function performAction(el) {
   const action=el.dataset.action;
-  try {
+
     if(el.dataset.view){navigate(el.dataset.view);return;}
     if(el.dataset.topic){const query=state.search;navigate('discussion',el.dataset.topic);if(el.dataset.scrollMessage)requestAnimationFrame(()=>{const msg=document.getElementById(`message-${el.dataset.scrollMessage}`);if(!msg)return;msg.scrollIntoView({block:'center'});highlightSearchHits(msg,query);});return;}
     if(el.dataset.reply){const snap=captureUI();state.reply=el.dataset.reply;render();restoreUI(snap);$('#message-draft')?.focus();return;}
@@ -695,7 +694,16 @@ document.addEventListener('click',async event=>{
       case 'export':{el.disabled=true;const data=await api('/export');const url=URL.createObjectURL(new Blob([JSON.stringify(data,null,2)],{type:'application/json;charset=utf-8'}));const a=document.createElement('a');a.href=url;a.download=`共席-工作区-${new Date().toISOString().slice(0,10)}.json`;a.click();setTimeout(()=>URL.revokeObjectURL(url),2000);el.disabled=false;toast('工作区已导出。');break;}
       case 'retry':if(state.data)await refresh(true);else await start();break;
     }
-  } catch(error){actionFailed(error.message);toast(error.message);if(el.isConnected)el.disabled=false;}
+}
+
+document.addEventListener('click',async event=>{
+  const el=event.target.closest('button,[data-action]');if(!el)return;
+  const retry=async()=>{
+    try { await performAction(el); actionSucceeded(); }
+    catch(err){ actionFailed(err.message,retry); toast(err.message); }
+  };
+  try { await performAction(el); actionSucceeded(); }
+  catch(error){actionFailed(error.message,retry);toast(error.message);if(el.isConnected)el.disabled=false;}
 });
 function updateActionError() {
   const slot = $('#action-error');
