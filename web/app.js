@@ -166,7 +166,7 @@ function resetRegions(){ shell = null; discussionView = null; messageNodes.clear
 
 function shellHTML() {
   return `<div class="docshell">
-    <header class="topbar">${brand()}<div class="workspace-line"><b id="space-name"></b></div><div class="tools">${themePicker()}<button class="icon-button" data-view="search" aria-label="搜索工作区">${icon('search')}</button><button class="icon-button" data-action="drawer-open" aria-label="打开索引">${icon('menu')}</button>${owner()?button('邀请参与者','invite'):''}</div></header>
+    <header class="topbar">${brand()}<div class="workspace-line"><b id="space-name"></b></div><div class="tools">${themePicker()}<button class="icon-button" data-view="search" aria-label="搜索工作区">${icon('search')}</button><button class="icon-button" data-action="drawer-open" aria-label="打开摘要与索引" aria-controls="drawer-panel">${icon('menu')}</button>${owner()?button('邀请参与者','invite'):''}</div></header>
     <div id="error-slot"></div><div id="action-error"></div>
     <nav class="topicstrip" id="topic-strip" aria-label="议题与视图"></nav>
     <div class="docbody"><aside class="docindex" id="doc-index" aria-label="研究室导航"></aside><main id="main" tabindex="-1"></main></div>
@@ -251,6 +251,8 @@ function updateShell() {
   setRegion(shell.drawer, drawerHTML(d), [d.tasks.filter(t=>t.status!=='done').length, d.decisions.length, d.members.filter(m=>!m.revoked_at).length, String(drawerOpen), String(state.lastSync)].join('|'));
   if (drawerOpen) shell.drawerPanel.innerHTML = drawerPanelHTML(d);
   shell.drawerPanel.classList.toggle('open', drawerOpen);
+  const topDrawerButton = app.querySelector('[data-action="drawer-open"]');
+  if (topDrawerButton) topDrawerButton.setAttribute('aria-expanded', String(drawerOpen));
   setRegion(shell.errorSlot, state.error ? `<div class="error error-banner" role="alert">${esc(state.error)} <button class="text-button" data-action="retry">重试</button></div>` : '', String(state.error));
   updateActionError();
   if (focusSel && !app.contains(document.activeElement)) {
@@ -702,8 +704,8 @@ async function performAction(el) {
         break;
       }
       case 'close-dialog':closeDialog();break;
-      case 'menu':state.mobile=true;render(true);$('.sidebar .nav-item')?.focus();break;
-      case 'close-menu':state.mobile=false;render(true);break;
+      case 'menu':drawerOpen=true;updateShell();break;
+      case 'close-menu':drawerOpen=false;updateShell();break;
       case 'gate-login':state.joining=false;state.initialized=true;state.error='';state.joinCode='';try{sessionStorage.removeItem('gongxi.invitation');}catch{}render();break;
       case 'gate-join':state.joining=true;state.error='';render();break;
       case 'import-credential':$('#credential-file')?.click();break;
@@ -790,7 +792,7 @@ window.addEventListener('storage',()=>{for(const el of document.querySelectorAll
 document.addEventListener('compositionstart',()=>{composing=true;});
 document.addEventListener('compositionend',()=>{composing=false;if(deferredRender){deferredRender=false;render(true);}});
 document.addEventListener('keydown',event=>{
-  if(event.key==='Escape'&&state.mobile){state.mobile=false;render(true);}
+  if(event.key==='Escape'&&drawerOpen){drawerOpen=false;updateShell();}
   if(event.key==='Escape'&&document.querySelector('mark.search-hit'))clearSearchHits();
   if((event.ctrlKey||event.metaKey)&&event.key==='Enter'&&event.target.id==='message-draft'){event.preventDefault();$('#message-form')?.requestSubmit();}
 });

@@ -9,15 +9,21 @@ export class DiscussionScroll {
     this.positions = new Map();
     this.unread = new Set();
     this.button = null;
-    this.bound = false;
+    this.boundNode = null;
+    this.boundResize = false;
   }
 
   bindScroll() {
-    if (this.bound) return;
-    const scroller = this.getScroller();
-    (scroller === this.win ? this.win : scroller).addEventListener('scroll', () => this.updateButton(), {passive: true});
-    this.win.addEventListener('resize', () => this.updateButton(), {passive: true});
-    this.bound = true;
+    const scroller = this.scroller();
+    if (this.boundNode === scroller) return;
+    if (this.boundNode && this.onScroll) this.boundNode.removeEventListener('scroll', this.onScroll);
+    this.onScroll = this.onScroll || (() => this.updateButton());
+    scroller.addEventListener('scroll', this.onScroll, {passive: true});
+    this.boundNode = scroller;
+    if (!this.boundResize) {
+      this.win.addEventListener('resize', () => this.updateButton(), {passive: true});
+      this.boundResize = true;
+    }
   }
   scroller() { const s = this.getScroller(); return s && s.addEventListener ? s : this.win; }
   scrollTop() { const s = this.scroller(); return s === this.win ? this.win.scrollY : s.scrollTop; }

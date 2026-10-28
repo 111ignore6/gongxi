@@ -1,3 +1,4 @@
+import {renderMarkdown} from '/static/markdown.mjs';
 const token0 = sessionStorage.getItem('gongxi.token') || '';
 const BT = String.fromCharCode(96);
 const state = {data: null, me: null, token: token0, topicId: new URLSearchParams(location.search).get('topic') || '', pending: null, authError: false};
@@ -30,25 +31,7 @@ function mountThemeToggle() {
 }
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
-function md(text) {
-  const raw = esc(text);
-  const blocks = raw.split(/\n{2,}/);
-  return blocks.map(block => {
-    if (/^\s*[-*] /m.test(block)) {
-      const items = block.split('\n').filter(l => /^\s*[-*] /.test(l)).map(l => '<li>' + l.replace(/^\s*[-*] /, '') + '</li>');
-      return '<ul>' + items.join('') + '</ul>';
-    }
-    let s = block;
-    s = s.replace(/^### (.*)$/gm, '<h3>$1</h3>');
-    s = s.replace(/^## (.*)$/gm, '<h2>$1</h2>');
-    s = s.replace(/^# (.*)$/gm, '<h1>$1</h1>');
-    s = s.replace(/^&gt; (.*)$/gm, '<blockquote>$1</blockquote>');
-    s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-    s = s.replace(new RegExp(BT + '([^' + BT + ']+)' + BT, 'g'), '<code>$1</code>');
-    s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
-    return '<p>' + s.replace(/\n/g, '<br>') + '</p>';
-  }).join('');
-}
+function md(text) { return renderMarkdown(text); }
 
 function time(iso) { return new Date(iso).toLocaleString('zh-CN', {month:'2-digit', day:'2-digit', hour:'2-digit', minute:'2-digit'}); }
 function memberName(id) { const m = state.data.members.find(x => x.id === id); return m ? m.name : '未知成员'; }
