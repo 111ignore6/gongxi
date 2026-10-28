@@ -598,7 +598,7 @@ async function copy(text) {try{await navigator.clipboard.writeText(text);toast('
 async function submit(form,event) {
   event.preventDefault();
   if(form.id==='message-form' && !$('#message-draft').value.trim()){setComposerMode(false);$('#message-draft').reportValidity();return;}
-  const values=Object.fromEntries(new FormData(form));const submitter=$('button[type="submit"]',form);if(submitter)submitter.disabled=true;
+  const values=Object.fromEntries(new FormData(form));const submitter=$('button[type="submit"]',form);if(submitter){submitter.disabled=true;submitter.dataset.busyLabel=submitter.textContent;submitter.textContent=form.id==='message-form'?'发表中…':'处理中…';submitter.setAttribute('aria-busy','true');}
   const errorArea=$('.form-error',form);if(errorArea)errorArea.innerHTML='';
   try {
     switch(form.id){
@@ -633,7 +633,7 @@ async function submit(form,event) {
     if(form.id==='direction-form'&&error.status===409)$('.form-error',form)?.insertAdjacentHTML('beforeend','<button type="button" class="text-button" data-action="direction-rebase">查看最新方向并保留我的草稿</button>');
     if(form.id==='login-form'&&(error.status===401||error.status===403)){state.token='';try{sessionStorage.removeItem('gongxi.token');}catch{}}
   }
-  finally{if(submitter?.isConnected)submitter.disabled=false;}
+  finally{if(submitter?.isConnected){submitter.disabled=false;submitter.removeAttribute('aria-busy');if(submitter.dataset.busyLabel){submitter.textContent=submitter.dataset.busyLabel;delete submitter.dataset.busyLabel;}}}
 }
 document.addEventListener('submit',event=>{const form=event.target;if(form instanceof HTMLFormElement)submit(form,event);});
 async function performAction(el) {
