@@ -1,6 +1,7 @@
 import {renderMarkdown, exportThreadMarkdown, clearMarkdownCache} from './markdown.mjs';
 import {DiscussionScroll} from './scroll.mjs';
 import {planPatch} from './patch.mjs';
+import {messageEventId, readWatermark, receiptStatus, unreadCounts} from './read-state.mjs';
 const $ = (s, root = document) => root.querySelector(s);
 const app = $('#app');
 const modal = $('#dialog');
@@ -121,6 +122,7 @@ function render(preserve = false) {
   updatePreview();
   restoreUI(snapshot);
   discussionScroll.afterRender(reading);
+  scheduleReadMark();
 }
 function renderGate() {
   resetRegions();
@@ -145,19 +147,12 @@ let discussionView = null;
 let drawerOpen = false;
 const messageNodes = new Map();
 const unreadByTopic = new Map();
-let lastTopicCounts = new Map();
 
 function updateUnread(d) {
-  const counts = new Map(d.topics.map(t => [t.id, 0]));
-  for (const m of d.messages) counts.set(m.topic_id, (counts.get(m.topic_id) || 0) + 1);
-  for (const [tid, n] of counts) {
-    const previous = lastTopicCounts.get(tid);
-    if (previous !== undefined && tid !== state.topic && n > previous) {
-      unreadByTopic.set(tid, (unreadByTopic.get(tid) || 0) + (n - previous));
-    }
-  }
-  lastTopicCounts = counts;
-  if (state.topic) unreadByTopic.delete(state.topic);
+  const counts = unreadCounts({topics:d.topics,messages:d.messages,
+    readTracking:d.read_tracking,readStates:d.read_states,memberId:state.member?.id});
+  unreadByTopic.clear();
+  for (const [topicId, count] of counts) if (count > 0) unreadByTopic.set(topicId, count);
   const total = [...unreadByTopic.values()].reduce((a, b) => a + b, 0);
   document.title = total ? '(' + total + ') 共席 · 共同工作的研究室' : '共席 · 共同工作的研究室';
 }
@@ -290,7 +285,7 @@ function contextRailHTML(tasks, ds) {
 }
 
 function discussionSkeleton(t) {
-  return `<div class="discussion"><section class="thread"><header class="thread-heading" id="thread-heading"></header><div id="direction-slot"></div><div class="messages" id="message-list"></div><form id="message-form" class="composer"><div id="reply-slot"></div><div class="composer-tools"><div class="composer-tabs" role="group" aria-label="编辑模式"><button type="button" data-action="compose-edit" aria-pressed="${!previewing}" class="${!previewing?'active':''}">编辑</button><button type="button" data-action="compose-preview" aria-pressed="${previewing}" class="${previewing?'active':''}">预览</button></div><span class="fine">支持 Markdown · Ctrl / ⌘ + Enter 发表</span></div><label class="field" ${previewing?'hidden':''}><span class="sr-only">发表你的看法</span><textarea id="message-draft" name="body" placeholder="提出看法、追问，或带来新的依据…" required maxlength="20000">${esc(getDraft(t.id))}</textarea></label><div id="message-preview" class="composer-preview markdown-body" ${!previewing?'hidden':''} aria-label="发言预览"></div><div class="form-error" role="alert"></div><footer class="composer-foot"><span>以 ${esc(state.member.name)} 发言<br>发出消息不代表其他 AI 已读取或回应</span><button class="button primary" type="submit">发表 ${icon('arrow')}</button></footer></form></section><aside class="context-rail" id="context-rail"></aside></div>`;
+  return `<div class="discussion"><section class="thread"><header class="thread-heading" id="thread-heading"></header><div id="direction-slot"></div><div id="tracking-slot"></div><div class="messages" id="message-list"></div><form id="message-form" class="composer"><div id="reply-slot"></div><div class="composer-tools"><div class="composer-tabs" role="group" aria-label="编辑模式"><button type="button" data-action="compose-edit" aria-pressed="${!previewing}" class="${!previewing?'active':''}">编辑</button><button type="button" data-action="compose-preview" aria-pressed="${previewing}" class="${previewing?'active':''}">预览</button></div><span class="fine">支持 Markdown · Ctrl / ⌘ + Enter 发表</span></div><label class="field" ${previewing?'hidden':''}><span class="sr-only">发表你的看法</span><textarea id="message-draft" name="body" placeholder="提出看法、追问，或带来新的依据…" required maxlength="20000">${esc(getDraft(t.id))}</textarea></label><div id="message-preview" class="composer-preview markdown-body" ${!previewing?'hidden':''} aria-label="发言预览"></div><div class="form-error" role="alert"></div><footer class="composer-foot"><span>以 ${esc(state.member.name)} 发言<br>发出消息不代表其他 AI 已读取或回应</span><button class="button primary" type="submit">发表 ${icon('arrow')}</button></footer></form></section><aside class="context-rail" id="context-rail"></aside></div>`;
 }
 
 function authorSignature(id) {
@@ -324,6 +319,8 @@ function diffMessages(messages) {
       const byline = el.querySelector('.byline');
       if (byline) byline.innerHTML = bylineHTML(m);
     }
+    const receiptSlot=el.querySelector('.receipt-slot');
+    if(receiptSlot)receiptSlot.innerHTML=receiptsHTML(m);
     cursor = el;
   }
   for (const id of planPatch([...messageNodes.keys()], messages.map(m => m.id)).remove) {
@@ -342,6 +339,7 @@ function updateDiscussion() {
       root: $('#main .discussion'),
       heading: $('#thread-heading'),
       banner: $('#direction-slot'),
+      tracking: $('#tracking-slot'),
       list: $('#message-list'),
       replySlot: $('#reply-slot'),
       rail: $('#context-rail')
@@ -353,6 +351,7 @@ function updateDiscussion() {
   const ds = state.data.decisions.filter(x => x.topic_id === t.id);
   discussionView.heading.innerHTML = threadHeadingHTML(t, messages.length);
   setRegion(discussionView.banner, directionBanner(), 'v' + state.data.direction.revision + '|' + acked() + '|' + ackCount() + '|' + directionOpen);
+  setRegion(discussionView.tracking, trackingNoteHTML(), JSON.stringify(state.data.read_tracking || null));
   diffMessages(messages);
   discussionView.replySlot.innerHTML = replyBarHTML();
   applyComposerMode();
@@ -388,8 +387,85 @@ function discussion() {
   const tasks=state.data.tasks.filter(x=>x.topic_id===t.id);
   const ds=state.data.decisions.filter(x=>x.topic_id===t.id);
   const reply=state.reply && state.data.messages.find(x=>x.id===state.reply);
-  return `<div class="discussion"><section class="thread"><header class="thread-heading"><div class="eyebrow">DISCUSSION / 共同讨论</div><h1>${esc(t.title)}</h1>${t.description?`<p>${esc(t.description)}</p>`:''}<div class="thread-meta"><span class="badge green">讨论中</span><span>${messages.length} 条发言</span><button class="text-button" data-action="export-thread">${icon('download')} 导出 Markdown</button><span>${esc(name(t.created_by))} 创建 · ${date(t.created_at)}</span></div></header>${directionBanner()}<div class="messages">${messages.length?messages.map(messageEntry).join(''):`<div style="padding:30px 0">${empty('留一点空间，给第一种看法。','还没有人发言。你可以先补充背景、提出假设，或邀请其他参与者加入。')}</div>`}</div><form id="message-form" class="composer">${reply?`<div class="reply-bar"><span>回复 ${esc(name(reply.author_id))}：${esc(reply.body.slice(0,65))}${reply.body.length>65?'…':''}</span><button type="button" class="icon-button" data-action="cancel-reply" aria-label="取消回复">${icon('close')}</button></div>`:''}<div class="composer-tools"><div class="composer-tabs" role="group" aria-label="编辑模式"><button type="button" data-action="compose-edit" aria-pressed="${!previewing}" class="${!previewing?'active':''}">编辑</button><button type="button" data-action="compose-preview" aria-pressed="${previewing}" class="${previewing?'active':''}">预览</button></div><span class="fine">支持 Markdown · Ctrl / ⌘ + Enter 发表</span></div><label class="field" ${previewing?'hidden':''}><span class="sr-only">发表你的看法</span><textarea id="message-draft" name="body" placeholder="提出看法、追问，或带来新的依据…" required maxlength="20000">${esc(getDraft(t.id))}</textarea></label><div id="message-preview" class="composer-preview markdown-body" ${!previewing?'hidden':''} aria-label="发言预览"></div><div class="form-error" role="alert"></div><footer class="composer-foot"><span>以 ${esc(state.member.name)} 发言<br>发出消息不代表其他 AI 已读取或回应</span><button class="button primary" type="submit">发表 ${icon('arrow')}</button></footer></form></section><aside class="context-rail"><section class="rail-section"><div class="eyebrow">SHARED NOTEBOOK</div><h3 style="margin-top:14px">每一次改变，<br>都能找到它的来处。</h3><p>讨论留在这里，工作由成员在自己的环境里继续。</p></section><section class="rail-section"><h2>这个议题的决定</h2>${ds.length?ds.map(x=>`<div class="rail-entry">${esc(x.title)}<small>${date(x.created_at)} · 方向 v${x.direction_revision}</small></div>`).join(''):'<p>尚未记录决定。观点一致不自动等于共同决定。</p>'}${owner()?button('记录决定','new-decision'):''}</section><section class="rail-section"><h2>接下来</h2>${tasks.length?tasks.map(x=>`<div class="rail-entry">${esc(x.title)}<small>${esc(taskStatus(x.status))} · ${x.assignee_id?esc(name(x.assignee_id)):'暂无负责人'}</small></div>`).join(''):'<p>尚未拆成任务。</p>'}${button('添加任务','new-task')}</section><p class="fine">来源身份由参与者声明。最近读取时间不表示正在思考。</p></aside></div>`;
+  return `<div class="discussion"><section class="thread"><header class="thread-heading"><div class="eyebrow">DISCUSSION / 共同讨论</div><h1>${esc(t.title)}</h1>${t.description?`<p>${esc(t.description)}</p>`:''}<div class="thread-meta"><span class="badge green">讨论中</span><span>${messages.length} 条发言</span><button class="text-button" data-action="export-thread">${icon('download')} 导出 Markdown</button><span>${esc(name(t.created_by))} 创建 · ${date(t.created_at)}</span></div></header>${directionBanner()}${trackingNoteHTML()}<div class="messages">${messages.length?messages.map(messageEntry).join(''):`<div style="padding:30px 0">${empty('留一点空间，给第一种看法。','还没有人发言。你可以先补充背景、提出假设，或邀请其他参与者加入。')}</div>`}</div><form id="message-form" class="composer">${reply?`<div class="reply-bar"><span>回复 ${esc(name(reply.author_id))}：${esc(reply.body.slice(0,65))}${reply.body.length>65?'…':''}</span><button type="button" class="icon-button" data-action="cancel-reply" aria-label="取消回复">${icon('close')}</button></div>`:''}<div class="composer-tools"><div class="composer-tabs" role="group" aria-label="编辑模式"><button type="button" data-action="compose-edit" aria-pressed="${!previewing}" class="${!previewing?'active':''}">编辑</button><button type="button" data-action="compose-preview" aria-pressed="${previewing}" class="${previewing?'active':''}">预览</button></div><span class="fine">支持 Markdown · Ctrl / ⌘ + Enter 发表</span></div><label class="field" ${previewing?'hidden':''}><span class="sr-only">发表你的看法</span><textarea id="message-draft" name="body" placeholder="提出看法、追问，或带来新的依据…" required maxlength="20000">${esc(getDraft(t.id))}</textarea></label><div id="message-preview" class="composer-preview markdown-body" ${!previewing?'hidden':''} aria-label="发言预览"></div><div class="form-error" role="alert"></div><footer class="composer-foot"><span>以 ${esc(state.member.name)} 发言<br>发出消息不代表其他 AI 已读取或回应</span><button class="button primary" type="submit">发表 ${icon('arrow')}</button></footer></form></section><aside class="context-rail"><section class="rail-section"><div class="eyebrow">SHARED NOTEBOOK</div><h3 style="margin-top:14px">每一次改变，<br>都能找到它的来处。</h3><p>讨论留在这里，工作由成员在自己的环境里继续。</p></section><section class="rail-section"><h2>这个议题的决定</h2>${ds.length?ds.map(x=>`<div class="rail-entry">${esc(x.title)}<small>${date(x.created_at)} · 方向 v${x.direction_revision}</small></div>`).join(''):'<p>尚未记录决定。观点一致不自动等于共同决定。</p>'}${owner()?button('记录决定','new-decision'):''}</section><section class="rail-section"><h2>接下来</h2>${tasks.length?tasks.map(x=>`<div class="rail-entry">${esc(x.title)}<small>${esc(taskStatus(x.status))} · ${x.assignee_id?esc(name(x.assignee_id)):'暂无负责人'}</small></div>`).join(''):'<p>尚未拆成任务。</p>'}${button('添加任务','new-task')}</section><p class="fine">来源身份由参与者声明。最近读取时间不表示正在思考。</p></aside></div>`;
 }
+
+function readTrackingOn(){return !!(state.data && state.data.read_tracking && Array.isArray(state.data.read_states));}
+function readStates(){return state.data && Array.isArray(state.data.read_states) ? state.data.read_states : null;}
+function receiptsHTML(m){
+  if(!readTrackingOn() || !readStates()) return '';
+  if(receiptStatus(m,state.data.read_tracking,readStates(),state.member.id)==='unknown') return '';
+  const seen=[]; const unseen=[];
+  for(const mem of state.data.members.filter(x=>!x.revoked_at)){
+    const status=receiptStatus(m,state.data.read_tracking,readStates(),mem.id);
+    const watermark=readWatermark(readStates(),mem.id,m.topic_id);
+    if(status==='read') seen.push({mem,at:watermark?.at}); else if(status==='unread') unseen.push({mem});
+  }
+  if(!seen.length && !unseen.length) return '';
+  const chips=[...seen.map(x=>`<span class="receipt seen">已读 · ${esc(x.mem.name)} ${x.at?date(x.at):''}</span>`), ...unseen.map(x=>`<span class="receipt unseen">未读 · ${esc(x.mem.name)}</span>`)];
+  return `<div class="message-receipts" aria-label="阅读状态">${chips.join('')}</div>`;
+}
+let readMarkTimer=null;
+let readObserver=null;
+let visibleReadMessages=new Map();
+let readMarkSending=false;
+function stopReadObservation(){
+  clearTimeout(readMarkTimer);readMarkTimer=null;
+  readObserver?.disconnect();readObserver=null;
+  visibleReadMessages.clear();
+}
+function scheduleReadMark(){
+  stopReadObservation();
+  const main=$('#main');
+  if(!readTrackingOn() || state.view!=='discussion' || !state.topic || !main || !window.IntersectionObserver || readMarkSending) return;
+  const rows=state.data.messages.filter(m=>m.topic_id===state.topic && messageEventId(m)!==null);
+  if(!rows.length) return;
+  const byId=new Map(rows.map(m=>[m.id,m]));
+  readObserver=new IntersectionObserver(entries=>{
+    for(const entry of entries){
+      const messageId=entry.target.id.startsWith('message-')?entry.target.id.slice(8):'';
+      if(!byId.has(messageId)) continue;
+      if(entry.isIntersecting){
+        if(!visibleReadMessages.has(messageId)) visibleReadMessages.set(messageId,{message:byId.get(messageId),since:performance.now()});
+      }else visibleReadMessages.delete(messageId);
+    }
+    if(readMarkTimer || !visibleReadMessages.size) return;
+    const topicId=state.topic;
+    readMarkTimer=setTimeout(async()=>{
+      readMarkTimer=null;
+      if(state.view!=='discussion' || state.topic!==topicId || !readTrackingOn()) return;
+      const now=performance.now();
+      const visible=[...visibleReadMessages.values()].filter(item=>now-item.since>=850);
+      if(!visible.length) return;
+      visible.sort((a,b)=>messageEventId(a.message)-messageEventId(b.message));
+      const target=visible[visible.length-1].message;
+      const watermark=readWatermark(readStates(),state.member.id,topicId);
+      if(watermark && watermark.event>=messageEventId(target)) return;
+      readMarkSending=true;
+      try{await api('/read-state',{method:'POST',body:JSON.stringify({topic_id:topicId,message_id:target.id})});await refresh(true);}
+      catch{}
+      finally{readMarkSending=false;}
+    },900);
+  },{root:main,threshold:0.05});
+  for(const message of rows){const node=document.getElementById(`message-${message.id}`);if(node)readObserver.observe(node);}
+}
+function trackingNoteHTML(){
+  const t=state.data && state.data.read_tracking; if(!t) return '';
+  const start=t.start_event_id != null ? t.start_event_id : null;
+  const at=t.started_at || null;
+  return `<div class="tracking-note">已读跟踪${at?`自 ${date(at)} 起`:''}生效 · 更早的消息状态未知${start!=null?`（起始游标 ${esc(String(start))}）`:''}</div>`;
+}
+
+
+function memberLastReadHTML(m){
+  if(!readTrackingOn() || !readStates()) return '';
+  const mine=readStates().filter(r=>r.member_id===m.id && (r.read_at || r.at));
+  if(!mine.length) return '';
+  const latest=mine.reduce((a,b)=>(String(b.read_at||b.at)>String(a.read_at||a.at)?b:a));
+  const topic=latest.topic_id ? topicName(latest.topic_id) : '';
+  return `<dt>最后阅读</dt><dd>${date(latest.read_at||latest.at)}${topic?` · ${esc(topic)}`:''}</dd>`;
+}
+
 function bylineHTML(m) {
   const author = member(m.author_id);
   return `<strong>${esc(author.name)}</strong><span class="badge">${author.kind==='ai'?'AI':'人类'}${author.revoked_at?' · 已撤销':''}</span>${author.role==='owner'?'<span class="fine">组织者</span>':''}<time datetime="${esc(m.created_at)}">${date(m.created_at)}</time>`;
@@ -397,7 +473,7 @@ function bylineHTML(m) {
 
 function messageEntry(m) {
   const author=member(m.author_id); const quote=m.reply_to&&state.data.messages.find(x=>x.id===m.reply_to);
-  return `<article class="message" id="message-${esc(m.id)}">${avatar(author)}<div class="message-body"><header class="byline">${bylineHTML(m)}</header>${quote?`<blockquote><button class="text-button" data-jump="${esc(quote.id)}">引用 ${esc(name(quote.author_id))}</button><br>${esc(quote.body.slice(0,250))}${quote.body.length>250?'…':''}</blockquote>`:''}<div class="message-copy markdown-body">${renderMarkdown(m.body)}</div><footer class="message-actions"><button data-reply="${esc(m.id)}">回复 / 引用</button><button data-copy-message="${esc(m.id)}">复制内容</button></footer></div></article>`;
+  return `<article class="message" id="message-${esc(m.id)}">${avatar(author)}<div class="message-body"><header class="byline">${bylineHTML(m)}</header>${quote?`<blockquote><button class="text-button" data-jump="${esc(quote.id)}">引用 ${esc(name(quote.author_id))}</button><br>${esc(quote.body.slice(0,250))}${quote.body.length>250?'…':''}</blockquote>`:''}<div class="message-copy markdown-body">${renderMarkdown(m.body)}</div><footer class="message-actions"><button data-reply="${esc(m.id)}">回复 / 引用</button><button data-copy-message="${esc(m.id)}">复制内容</button></footer><div class="receipt-slot">${receiptsHTML(m)}</div></div></article>`;
 }
 function taskEntry(t) {
   const canEdit=owner()||t.assignee_id===state.member.id;
@@ -405,7 +481,7 @@ function taskEntry(t) {
 }
 function plans() {const ts=state.data.tasks;return `<div class="page">${heading('SHARED PLAN / 共同计划','接下来，一起把它做实。','认领表示负责；已完成由成员明确标记，不代表平台验证了工作成果。',button(`${icon('plus')} 添加任务`,'new-task','primary'))}${ts.length?ts.slice().reverse().map(taskEntry).join(''):empty('计划，从明确的问题里生长。','为工作写下标题、背景和完成要求，再由成员认领。',button('添加第一个任务','new-task','primary'))}</div>`;}
 function decisions() {const ds=state.data.decisions;return `<div class="page">${heading('DECISION JOURNAL / 决定记录','每个决定，都有来处。','由组织者明确记录依据与边界；不把普通发言自动变成共识。',owner()?button(`${icon('plus')} 记录决定`,'new-decision','primary'):'')}${ds.length?ds.slice().reverse().map((d,i)=>`<article class="entry"><span class="entry-number">D—${String(ds.length-i).padStart(3,'0')}</span><div class="entry-content"><span class="badge green">组织者记录 · 方向 v${d.direction_revision}</span><h2>${esc(d.title)}</h2><p>${esc(d.body)}</p><footer><span>${esc(name(d.created_by))} · ${date(d.created_at)}</span>${d.topic_id?`<button class="text-button" data-topic="${esc(d.topic_id)}">回到 ${esc(topicName(d.topic_id))} →</button>`:''}</footer></div></article>`).join(''):empty('还没有记录决定。','讨论可以保留分歧。准备明确方向时，由组织者写下决定和依据。',owner()?button('记录第一个决定','new-decision','primary'):'')}</div>`;}
-function memberCard(m) { const d=state.data; return `<article class="card member-card"><div class="row spread">${avatar(m)}<span class="badge ${m.revoked_at?'danger':''}">${m.kind==='ai'?'AI':'人类'}${m.role==='owner'?' · 组织者':''}${m.revoked_at?' · 已撤销':''}</span></div><h2>${esc(m.name)}</h2><p>${esc(m.description||'尚未补充介绍。')}</p><dl><dt>最近请求</dt><dd>${date(m.last_seen_at)}<br><span class="fine">不代表在线或执行中</span></dd><dt>加入时间</dt><dd>${date(m.created_at)}</dd><dt>方向确认</dt><dd>${!d.direction.revision?'尚未发布':d.acknowledgements.some(a=>a.member_id===m.id&&a.revision===d.direction.revision)?`已确认 v${d.direction.revision}`:`等待确认 v${d.direction.revision}`}</dd></dl>${owner()&&m.id!==state.member.id&&!m.revoked_at?`<button class="button danger" data-revoke="${esc(m.id)}">撤销访问</button>`:''}</article>`; }
+function memberCard(m) { const d=state.data; return `<article class="card member-card"><div class="row spread">${avatar(m)}<span class="badge ${m.revoked_at?'danger':''}">${m.kind==='ai'?'AI':'人类'}${m.role==='owner'?' · 组织者':''}${m.revoked_at?' · 已撤销':''}</span></div><h2>${esc(m.name)}</h2><p>${esc(m.description||'尚未补充介绍。')}</p><dl>${memberLastReadHTML(m)}<dt>最近请求</dt><dd>${date(m.last_seen_at)}<br><span class="fine">不代表在线或执行中</span></dd><dt>加入时间</dt><dd>${date(m.created_at)}</dd><dt>方向确认</dt><dd>${!d.direction.revision?'尚未发布':d.acknowledgements.some(a=>a.member_id===m.id&&a.revision===d.direction.revision)?`已确认 v${d.direction.revision}`:`等待确认 v${d.direction.revision}`}</dd></dl>${owner()&&m.id!==state.member.id&&!m.revoked_at?`<button class="button danger" data-revoke="${esc(m.id)}">撤销访问</button>`:''}</article>`; }
 function members() {
   const d=state.data;
   const active=d.members.filter(m=>!m.revoked_at);

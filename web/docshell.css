@@ -1,6 +1,9 @@
 /* Document-desk shell: top-level structure for the accepted C direction. */
 :root{--idx-w:224px;--drawer-h:52px}
-html,body{height:100%;overflow:hidden}
+html{height:100%}
+body{min-height:100%}
+body:has(.docshell){height:100%;overflow:hidden}
+.gate{overflow:auto}
 .docshell{display:flex;flex-direction:column;height:100dvh;overflow:hidden;background:var(--surface)}
 .topbar{flex:none;display:flex;align-items:center;gap:18px;min-height:64px;padding:0 28px;border-bottom:1px solid var(--border);background:var(--surface)}
 .topbar .brand{gap:10px;font-size:18px}

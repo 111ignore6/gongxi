@@ -69,7 +69,17 @@ class Message(Input):
     topic_id: str = Field(min_length=1, max_length=80)
     body: str = Field(min_length=1, max_length=20000)
     reply_to: str | None = Field(default=None, min_length=1, max_length=80)
+    action_for: list[str] = Field(default_factory=list, max_length=32)
     idempotency_key: str | None = Field(default=None, min_length=1, max_length=200)
+
+
+class ReadState(Input):
+    topic_id: str = Field(min_length=1, max_length=80)
+    message_id: str = Field(min_length=1, max_length=80)
+
+
+class MessageActionState(Input):
+    status: Literal["pending", "handled", "no_action"]
 
 
 class Task(Topic):
@@ -124,7 +134,19 @@ def create_app(data_dir=None):
                 CREATE TABLE IF NOT EXISTS idempotency(member_id TEXT NOT NULL,key TEXT NOT NULL,body TEXT NOT NULL,message_id TEXT NOT NULL,PRIMARY KEY(member_id,key));
                 CREATE TABLE IF NOT EXISTS directions(revision INTEGER PRIMARY KEY,data TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS acknowledgements(member_id TEXT NOT NULL,revision INTEGER NOT NULL,data TEXT NOT NULL,PRIMARY KEY(member_id,revision));
+                CREATE TABLE IF NOT EXISTS app_settings(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS topic_read_states(
+                    member_id TEXT NOT NULL, topic_id TEXT NOT NULL,
+                    last_read_event_id INTEGER NOT NULL, last_read_message_id TEXT NOT NULL,
+                    read_at TEXT NOT NULL, PRIMARY KEY(member_id,topic_id));
+                CREATE TABLE IF NOT EXISTS message_action_states(
+                    message_id TEXT NOT NULL, member_id TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK(status IN ('pending','handled','no_action')),
+                    updated_at TEXT NOT NULL, PRIMARY KEY(message_id,member_id));
+                CREATE INDEX IF NOT EXISTS message_action_states_member ON message_action_states(member_id,status);
             """)
+            db.execute("INSERT OR IGNORE INTO app_settings(key,value) SELECT 'read_tracking_start_event_id', CAST(COALESCE(MAX(id),0) AS TEXT) FROM events")
+            db.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('read_tracking_started_at',?)", (now(),))
 
     @asynccontextmanager
     async def lifespan(app):
@@ -266,6 +288,16 @@ def create_app(data_dir=None):
         row = db.execute("SELECT data FROM directions ORDER BY revision DESC LIMIT 1").fetchone()
         return json.loads(row[0]) if row else {"revision": 0, "body": "", "created_by": None, "created_at": None}
 
+    def decorate_messages(db, messages):
+        if not messages:
+            return messages
+        event_rows = db.execute("SELECT id,entity_id FROM events WHERE type='message.created'")
+        event_ids = {row["entity_id"]: row["id"] for row in event_rows}
+        for message in messages:
+            message.setdefault("action_for", [])
+            message["event_id"] = event_ids.get(message["id"])
+        return messages
+
     def state(db, include_messages=True):
         result = {"workspace": workspace(db), "members": [json.loads(r[0]) for r in db.execute("SELECT data FROM members ORDER BY rowid")]}
         for singular, plural in (("topic", "topics"), ("message", "messages"), ("task", "tasks"), ("decision", "decisions")):
@@ -273,8 +305,19 @@ def create_app(data_dir=None):
                 result[plural] = []
                 continue
             result[plural] = [json.loads(r[0]) for r in db.execute("SELECT data FROM entities WHERE kind=? ORDER BY rowid", (singular,))]
+        if include_messages:
+            decorate_messages(db, result["messages"])
         if not include_messages:
             result["messages_included"] = False
+        settings = dict(db.execute("SELECT key,value FROM app_settings WHERE key IN ('read_tracking_start_event_id','read_tracking_started_at')"))
+        result["read_tracking"] = {
+            "start_event_id": int(settings.get("read_tracking_start_event_id", "0")),
+            "started_at": settings.get("read_tracking_started_at"),
+        }
+        result["read_states"] = [dict(r) for r in db.execute(
+            "SELECT member_id,topic_id,last_read_message_id,last_read_event_id,read_at FROM topic_read_states ORDER BY topic_id,member_id")]
+        result["action_states"] = [dict(r) for r in db.execute(
+            "SELECT message_id,member_id,status,updated_at FROM message_action_states ORDER BY message_id,member_id")]
         result["direction"] = direction(db)
         result["acknowledgements"] = [json.loads(r[0]) for r in db.execute("SELECT data FROM acknowledgements ORDER BY rowid")]
         result["cursor"] = db.execute("SELECT COALESCE(MAX(id),0) FROM events").fetchone()[0]
@@ -365,11 +408,44 @@ def create_app(data_dir=None):
         ))
         more = len(rows) > limit
         rows = rows[:limit]
+        page_messages = [json.loads(row["data"]) for row in reversed(rows)]
+        decorate_messages(db, page_messages)
         return {
-            "messages": [json.loads(row["data"]) for row in reversed(rows)],
+            "messages": page_messages,
             "has_more": more,
             "next_before": rows[-1]["rowid"] if more else None,
         }
+
+    @app.post("/api/read-state")
+    def update_read_state(body: ReadState, actor=Depends(member), db=Depends(database)):
+        check_topic(db, body.topic_id)
+        message_value = get(db, "message", body.message_id)
+        if message_value["topic_id"] != body.topic_id:
+            fail(409, "已读消息必须属于指定议题")
+        event_row = db.execute(
+            "SELECT id FROM events WHERE type='message.created' AND entity_id=?", (body.message_id,)
+        ).fetchone()
+        if not event_row:
+            fail(409, "该消息没有可用的已读位置")
+        target_event_id = int(event_row["id"])
+        current = db.execute(
+            "SELECT member_id,topic_id,last_read_message_id,last_read_event_id,read_at "
+            "FROM topic_read_states WHERE member_id=? AND topic_id=?",
+            (actor["id"], body.topic_id),
+        ).fetchone()
+        if current and target_event_id <= current["last_read_event_id"]:
+            return dict(current)
+        timestamp = now()
+        db.execute(
+            "INSERT INTO topic_read_states(member_id,topic_id,last_read_event_id,last_read_message_id,read_at) "
+            "VALUES(?,?,?,?,?) ON CONFLICT(member_id,topic_id) DO UPDATE SET "
+            "last_read_event_id=excluded.last_read_event_id,last_read_message_id=excluded.last_read_message_id,read_at=excluded.read_at",
+            (actor["id"], body.topic_id, target_event_id, body.message_id, timestamp),
+        )
+        event(db, "member.read_state_updated", body.topic_id, actor["id"])
+        return {"member_id": actor["id"], "topic_id": body.topic_id,
+                "last_read_message_id": body.message_id, "last_read_event_id": target_event_id,
+                "read_at": timestamp}
 
     @app.post("/api/invites")
     def invite(body: Invite, actor=Depends(owner), db=Depends(database)):
@@ -407,21 +483,64 @@ def create_app(data_dir=None):
 
     @app.post("/api/messages")
     def message(body: Message, actor=Depends(member), db=Depends(database)):
-        canonical = json.dumps(body.model_dump(exclude={"idempotency_key"}), sort_keys=True, ensure_ascii=False)
+        targets = sorted(body.action_for)
+        if len(targets) != len(set(targets)):
+            fail(422, "action_for 不能包含重复成员")
+        canonical_value = body.model_dump(exclude={"idempotency_key"})
+        if targets:
+            canonical_value["action_for"] = targets
+        else:
+            # Keep pre-feature idempotency records compatible with payloads that had no action_for field.
+            canonical_value.pop("action_for", None)
+        canonical = json.dumps(canonical_value, sort_keys=True, ensure_ascii=False)
         if body.idempotency_key:
             row = db.execute("SELECT body,message_id FROM idempotency WHERE member_id=? AND key=?", (actor["id"], body.idempotency_key)).fetchone()
             if row:
                 if row["body"] != canonical:
                     fail(409, "相同幂等键对应不同内容")
-                return get(db, "message", row["message_id"])
+                retry_value = get(db, "message", row["message_id"])
+                decorate_messages(db, [retry_value])
+                return retry_value
         check_topic(db, body.topic_id)
         if body.reply_to and get(db, "message", body.reply_to)["topic_id"] != body.topic_id:
             fail(409, "不能引用其他议题的回复")
-        value = put(db, "message", dict(id=uid(), topic_id=body.topic_id, body=body.body, reply_to=body.reply_to, author_id=actor["id"], created_at=now()))
+        for target_id in targets:
+            target_row = db.execute("SELECT data FROM members WHERE id=?", (target_id,)).fetchone()
+            if not target_row or json.loads(target_row["data"])["revoked_at"]:
+                fail(422, "action_for 必须是有效的活动成员")
+        timestamp = now()
+        value = put(db, "message", dict(id=uid(), topic_id=body.topic_id, body=body.body,
+                                         reply_to=body.reply_to, author_id=actor["id"],
+                                         action_for=targets, created_at=timestamp))
+        for target_id in targets:
+            db.execute("INSERT INTO message_action_states(message_id,member_id,status,updated_at) VALUES(?,?,?,?)",
+                       (value["id"], target_id, "pending", timestamp))
         if body.idempotency_key:
             db.execute("INSERT INTO idempotency VALUES(?,?,?,?)", (actor["id"], body.idempotency_key, canonical, value["id"]))
         event(db, "message.created", value["id"], actor["id"])
+        value["event_id"] = db.execute("SELECT id FROM events WHERE type='message.created' AND entity_id=?", (value["id"],)).fetchone()[0]
         return value
+
+    @app.patch("/api/messages/{ident}/action-state")
+    def update_message_action_state(ident: str, body: MessageActionState,
+                                    actor=Depends(member), db=Depends(database)):
+        message_value = get(db, "message", ident)
+        if actor["id"] not in message_value.get("action_for", []):
+            fail(403, "只有被指派的成员可以更新此处理状态")
+        row = db.execute(
+            "SELECT message_id,member_id,status,updated_at FROM message_action_states WHERE message_id=? AND member_id=?",
+            (ident, actor["id"]),
+        ).fetchone()
+        if not row:
+            fail(409, "该消息没有分配给当前成员的处理项")
+        if row["status"] == body.status:
+            return dict(row)
+        timestamp = now()
+        db.execute("UPDATE message_action_states SET status=?,updated_at=? WHERE message_id=? AND member_id=?",
+                   (body.status, timestamp, ident, actor["id"]))
+        event(db, "message.action_state_updated", ident, actor["id"])
+        return {"message_id": ident, "member_id": actor["id"],
+                "status": body.status, "updated_at": timestamp}
 
     @app.post("/api/tasks")
     def task(body: Task, actor=Depends(member), db=Depends(database)):

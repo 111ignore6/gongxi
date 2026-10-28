@@ -5,8 +5,8 @@
   --soft-panel:#F2EEE2; --sidebar:#1E2A24; --sidebar-hover:#2A3830; --sidebar-active:#33453A;
   --hero:#F2EEE2; --hero-border:#DDD6C6; --field-border:#D5CDBC; --shadow:0 24px 64px rgba(30,42,36,.10);
   --on-accent:#FBF6EE;
-  --serif:Georgia,'Songti SC','Noto Serif SC',SimSun,serif;
-  --sans:'PingFang SC','Microsoft YaHei UI','Segoe UI',system-ui,sans-serif;
+  --serif:'Noto Serif SC','Source Han Serif SC','STZhongsong','STSong','Songti SC',Georgia,serif;
+  --sans:'Noto Sans SC','PingFang SC','Microsoft YaHei UI','Segoe UI',system-ui,sans-serif;
   --mono:Consolas,'Cascadia Mono',monospace;
 }
 :root[data-theme="dark"]{
@@ -134,3 +134,45 @@ dialog{border-radius:3px}
   .task-actions label{display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
   .task-actions select{max-width:100%}
 }
+
+/* Typography pass: fewer monospace labels, larger body, calmer rhythm. */
+body{font-size:16px;line-height:1.95;letter-spacing:.01em;font-optical-sizing:auto}
+.message-copy{font-size:16.5px;line-height:2;max-width:66ch;letter-spacing:.012em}
+.thread-heading h1{font:500 36px/1.32 var(--serif);letter-spacing:.005em}
+.page-heading h1{font:500 32px/1.36 var(--serif);letter-spacing:.005em}
+.thread-heading p,.page-heading p,.hero h2+.fine{font-size:15px;line-height:1.95}
+.message{padding:28px 0}
+.byline{font-size:13.5px}
+.byline time{font-family:var(--mono);font-size:10.5px;letter-spacing:.06em}
+.eyebrow{font-family:var(--sans);font-size:11px;font-weight:600;letter-spacing:.18em}
+.thread-meta,.meta{letter-spacing:.03em}
+.composer textarea{font-size:16px;line-height:1.95}
+.composer-foot span{font-size:12px;line-height:1.8}
+.entry h2,.card h2{font:500 21px/1.65 var(--serif);letter-spacing:.005em}
+.entry p,.card p{font-size:14.5px;line-height:1.9}
+.task-actions .fine{font-size:12.5px}
+.idx-item{font-size:13px;line-height:1.7}
+.drawer{letter-spacing:.12em}
+@media(max-width:760px){
+  .composer-foot span{max-width:none;font-size:11.5px;line-height:1.75}
+  .composer-foot{align-items:flex-end;gap:10px}
+}
+.topbar .brand-mark{color:var(--accent);border-color:var(--accent)}
+
+/* Chinese reading measure: ~38-40 characters per line instead of a 66ch web default. */
+.message-copy{max-width:40em}
+.thread-heading p,.page-heading p,.dek{max-width:38em}
+.direction-banner p{max-width:40em}
+
+.message blockquote{max-width:40em}
+
+/* Gate keeps the paper masthead; the dark-rail mark must not leak in here. */
+.gate .brand-mark{color:var(--accent);border-color:var(--accent);background:transparent;font-size:20px}
+.gate .brand{color:var(--ink)}
+.gate .brand small{color:var(--muted)}
+
+/* read receipts */
+.message-receipts{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px;font:10.5px/1.6 var(--mono);letter-spacing:.04em;color:var(--muted)}
+.message-receipts .receipt{border:1px solid var(--border);border-radius:999px;padding:2px 9px;background:var(--panel)}
+.message-receipts .receipt.unseen{color:var(--accent);border-color:var(--accent)}
+.tracking-note{margin:16px 0 0;padding:10px 14px;border-left:3px solid var(--border);background:var(--panel);font:11.5px/1.8 var(--mono);color:var(--ink-2)}
