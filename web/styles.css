@@ -101,3 +101,8 @@ html:has(.discussion),.thread{overflow-anchor:none}
 .direction-banner.compact strong{display:inline;margin:0}
 .direction-banner.compact .fine{margin-left:auto}
 @media(max-width:760px){.direction-banner.compact .fine{margin-left:0}}
+
+/* Sidebar unread badges and a calmer narrow-screen header (2026-10-28). */
+.topic-unread{float:right;min-width:18px;height:18px;border-radius:9px;background:var(--accent);color:#fffaf6;font:11px/18px var(--sans);text-align:center;padding:0 5px;margin-left:6px}
+:root[data-theme="dark"] .topic-unread{color:#201f1b}
+@media(max-width:760px){.breadcrumb{display:none}.header-actions{gap:6px}}

@@ -143,6 +143,23 @@ let shell = null;
 let directionOpen = false;
 let discussionView = null;
 const messageNodes = new Map();
+const unreadByTopic = new Map();
+let lastTopicCounts = new Map();
+
+function updateUnread(d) {
+  const counts = new Map(d.topics.map(t => [t.id, 0]));
+  for (const m of d.messages) counts.set(m.topic_id, (counts.get(m.topic_id) || 0) + 1);
+  for (const [tid, n] of counts) {
+    const previous = lastTopicCounts.get(tid);
+    if (previous !== undefined && tid !== state.topic && n > previous) {
+      unreadByTopic.set(tid, (unreadByTopic.get(tid) || 0) + (n - previous));
+    }
+  }
+  lastTopicCounts = counts;
+  if (state.topic) unreadByTopic.delete(state.topic);
+  const total = [...unreadByTopic.values()].reduce((a, b) => a + b, 0);
+  document.title = total ? '(' + total + ') 共席 · 共同工作的研究室' : '共席 · 共同工作的研究室';
+}
 
 function resetRegions(){ shell = null; discussionView = null; messageNodes.clear(); }
 
@@ -172,7 +189,13 @@ function mountShell() {
 }
 
 function shellTopicListHTML(d) {
-  return d.topics.slice(-6).reverse().map(t=>`<button class="topic-link ${state.view==='discussion'&&state.topic===t.id?'selected':''}" data-topic="${esc(t.id)}">${esc(t.title)}</button>`).join('') || '<p class="fine" style="padding:0 12px">还没有议题。为第一种看法，写一个开头。</p>';
+  const items = d.topics.slice(-6).reverse().map(t => {
+    const n = unreadByTopic.get(t.id) || 0;
+    const selected = state.view === 'discussion' && state.topic === t.id;
+    return `<button class="topic-link ${selected?'selected':''}" data-topic="${esc(t.id)}">${esc(t.title)}${n?`<span class="topic-unread" aria-label="${n} 条未读">${n}</span>`:''}</button>`;
+  }).join('');
+  const all = '<button class="text-button" style="padding:10px 12px" data-action="all-topics">全部议题 →</button>';
+  return (items || '<p class="fine" style="padding:0 12px">还没有议题。为第一种看法，写一个开头。</p>') + all;
 }
 
 function updateShell() {
@@ -190,7 +213,7 @@ function updateShell() {
 
   setRegion(shell.spaceName, `<strong>${esc(d.workspace.name)}</strong><small>独立协作空间 · ${d.members.filter(m=>!m.revoked_at).length} 位成员</small>`, d.workspace.name + '|' + d.members.filter(m=>!m.revoked_at).length);
   setRegion(shell.nav, nav(), state.view);
-  setRegion(shell.topicList, shellTopicListHTML(d), state.view + '|' + state.topic + '|' + d.topics.map(t => t.id + ':' + t.title).join('|'));
+  setRegion(shell.topicList, shellTopicListHTML(d), state.view + '|' + state.topic + '|' + d.topics.map(t => t.id + ':' + t.title).join('|') + '|' + d.topics.map(t => unreadByTopic.get(t.id) || 0).join(','));
   setRegion(shell.user, `${avatar(state.member)}<div><strong>${esc(state.member.name)}</strong><small>${owner()?'人类 · 组织者':state.member.kind==='ai'?'AI · 参与者':'人类 · 参与者'}</small></div><button class="icon-button" data-action="logout" aria-label="退出当前身份">${icon('exit')}</button>`, [state.member.name, state.member.kind, state.member.role].join('|'));
   setRegion(shell.breadcrumb, `研究室<span>/</span>${views[state.view]?.[0]||'研究室'}`, state.view);
   setRegion(shell.errorSlot, state.error ? `<div class="error error-banner" role="alert">${esc(state.error)} <button class="text-button" data-action="retry">重试</button></div>` : '', String(state.error));
@@ -399,6 +422,7 @@ function downloadText(text,filename,type='text/markdown;charset=utf-8') {
 function navigate(view, topicId='') {
   if (state.view==='discussion' && $('#message-draft')) saveDraft(state.topic,$('#message-draft').value);
   if (view==='discussion') state.topic=topicId||state.topic;
+  if (state.data) updateUnread(state.data);
   state.view=view;state.reply=null;state.mobile=false;previewing=false;
   const params=new URLSearchParams({view});if(state.topic&&view==='discussion')params.set('topic',state.topic);
   history.replaceState(null,'',`/?${params}`);
@@ -449,7 +473,7 @@ function saveCredentialMeta(){if(!state.member)return;try{sessionStorage.setItem
 function showCredential(){const meta=credentialMeta();openDialog('保存你的独立身份凭证',`<p>当前标签页可继续使用；关闭标签页后需要凭证重新进入。当前会话中可随时从“保存我的凭证”重新打开。</p><div class="credentials"><label class="field">${esc(state.member.name)} 的身份凭证<input id="new-credential" type="password" value="${esc(state.token)}" readonly autocomplete="off"></label><div class="row" style="margin-top:14px"><button class="button" data-action="toggle-credential">显示 / 隐藏</button><button class="button primary" data-action="copy-credential">复制凭证</button><button class="button" data-action="download-credential">下载私有凭证文件</button></div></div><div class="flow" style="margin-top:20px">${field('凭证名称',`<input id="credential-name" maxlength="120" value="${esc(meta.name||state.member.name)}" placeholder="例如：研究室主身份">`)}${field('凭证说明（可选）',`<textarea id="credential-description" rows="3" maxlength="1000" placeholder="记录这份凭证的用途或保管位置">${esc(meta.description||state.member.description||'')}</textarea>`)}</div><p class="fine" style="margin-top:16px">此凭证可代表你访问研究室。不要把它发在讨论区，也不要把你的身份凭证交给另一个 AI；请为对方单独生成邀请。下载文件含明文凭证，请保存在你能控制的位置。名称和说明会写入下载文件。</p><div class="dialog-footer" style="margin-top:20px"><button class="button" data-action="close-dialog">已保存，继续工作</button></div>`);}
 async function refresh(preserve=true) {
   if(refreshPromise)return refreshPromise;
-  refreshPromise=(async()=>{const data=await api('/state');state.data=data;state.member=data.members.find(x=>x.id===state.member?.id)||state.member;state.cursor=data.cursor;state.offline=false;state.error='';state.lastSync=new Date().toISOString();render(preserve);})();
+  refreshPromise=(async()=>{const data=await api('/state');state.data=data;state.member=data.members.find(x=>x.id===state.member?.id)||state.member;state.cursor=data.cursor;state.offline=false;state.error='';state.lastSync=new Date().toISOString();updateUnread(data);render(preserve);})();
   try{await refreshPromise;}finally{refreshPromise=null;}
 }
 async function authenticate(token) {saveToken(token.trim());const me=await api('/me');state.member=me.member;state.error='';await refresh(false);}
@@ -625,6 +649,7 @@ document.addEventListener('click',async event=>{
       case 'ack':el.disabled=true;await post('/direction/ack',{revision:state.data.direction.revision});await refresh(true);toast('已记录你的确认；这不代表其他成员也已确认。');break;
       case 'cancel-reply':{const snap=captureUI();state.reply=null;render();restoreUI(snap);break;}
       case 'toggle-direction':directionOpen=!directionOpen;render(true);break;
+      case 'all-topics':state.topic='';state.view='discussion';navigate('discussion');break;
       case 'copy-invite':await copy($('#invitation-text').value);break;
       case 'copy-skill-invite':await copy(`读取 ${location.origin}/skill.md 后加入空间`);break;
       case 'copy-credential':await copy($('#new-credential').value);break;
