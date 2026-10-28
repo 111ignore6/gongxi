@@ -128,9 +128,8 @@ class ReadTrackingAcceptance(unittest.TestCase):
         self.assertEqual(self.state()['cursor'], after_advance)
 
         dsh_state = self.state(token=self.dsh_token)
-        self.assertEqual(len(dsh_state['read_states']), 1)
-        self.assertEqual(dsh_state['read_states'][0]['member_id'], self.owner_id)
-        self.assertEqual(dsh_state['read_states'][0]['last_read_message_id'], second['id'])
+        self.assertEqual(dsh_state['read_states'], [],
+                         'members must not receive other members\' reading watermarks')
         self.assertEqual(self.request('POST', '/api/read-state', {
             'topic_id': self.other_topic, 'message_id': first['id']})[0], 409)
         self.assertEqual(self.request('POST', '/api/read-state', {
@@ -147,13 +146,29 @@ class ReadTrackingAcceptance(unittest.TestCase):
         requested = self.post_message('Please review this', action_for=[self.dsh_id], idempotency_key='review-1')
         self.assertEqual(requested['action_for'], [self.dsh_id])
         self.assertIn('event_id', requested)
+        events = self.request('GET', '/api/events?after=0&limit=500')[1]['events']
+        ordinary_event = next(row for row in events if row['entity_id'] == ordinary['id'])
+        requested_event = next(row for row in events if row['entity_id'] == requested['id'])
+        self.assertEqual(ordinary_event['event_id'], ordinary['event_id'])
+        self.assertEqual(ordinary_event['action_for'], [])
+        self.assertEqual(requested_event['event_id'], requested['event_id'])
+        self.assertEqual(requested_event['action_for'], [self.dsh_id])
         current = self.state()
         self.assertEqual(current['messages'][0]['action_for'], [])
         self.assertEqual(current['action_states'], [{
             'message_id': requested['id'], 'member_id': self.dsh_id,
             'status': 'pending', 'updated_at': current['action_states'][0]['updated_at']}])
 
-        cursor = current['cursor']
+        status, reader_receipt = self.request('POST', '/api/read-state', {
+            'topic_id': self.topic, 'message_id': requested['id']}, token=self.dsh_token)
+        self.assertEqual(status, 200)
+        self.assertEqual(reader_receipt['member_id'], self.dsh_id)
+        reader_state = self.state(token=self.dsh_token)
+        self.assertEqual(reader_state['read_states'][0]['last_read_message_id'], requested['id'])
+        self.assertEqual(reader_state['action_states'][0]['status'], 'pending',
+                         'reading an assigned message must not mark it handled')
+
+        cursor = reader_state['cursor']
         retry = self.post_message('Please review this', action_for=[self.dsh_id], idempotency_key='review-1')
         self.assertEqual(retry['id'], requested['id'])
         self.assertEqual(retry['event_id'], requested['event_id'])
@@ -173,6 +188,10 @@ class ReadTrackingAcceptance(unittest.TestCase):
         self.assertEqual(duplicate, handled)
         self.assertEqual(self.state()['cursor'], cursor, 'same action status must be idempotent')
         self.assertEqual(self.state(token=self.dsh_token)['action_states'][0]['status'], 'handled')
+        self.stop_server()
+        self.start_server()
+        self.assertEqual(self.state(token=self.dsh_token)['action_states'][0]['status'], 'handled',
+                         'action state must survive service restart')
 
     def test_action_targets_must_be_unique_and_active_and_revocation_blocks_updates(self):
         self.assertEqual(self.request('POST', '/api/messages', {
@@ -185,6 +204,88 @@ class ReadTrackingAcceptance(unittest.TestCase):
         self.assertEqual(self.request('PATCH', f'/api/messages/{message["id"]}/action-state',
                                       {'status': 'handled'}, token=self.dsh_token)[0], 401)
         self.assertEqual(self.state()['action_states'][0]['status'], 'pending')
+
+    def test_read_and_action_metadata_visibility_is_scoped_to_relevant_roles(self):
+        def join(name):
+            invite = self.request('POST', '/api/invites', {'kind': 'ai'})[1]
+            return self.request('POST', '/api/join', {
+                'code': invite['code'], 'name': name, 'kind': 'ai'})[1]
+
+        author = join('Author')
+        stranger = join('Unrelated')
+        authored_message = self.request('POST', '/api/messages', {
+            'topic_id': self.topic, 'body': 'Assigned by author',
+            'action_for': [self.dsh_id]}, token=author['token'])[1]
+        owner_message = self.post_message('Assigned by owner', action_for=[self.dsh_id])
+
+        for token in (self.owner_token, author['token'], self.dsh_token, stranger['token']):
+            status, _ = self.request('POST', '/api/read-state', {
+                'topic_id': self.topic, 'message_id': authored_message['id']}, token=token)
+            self.assertEqual(status, 200)
+        for message in (authored_message, owner_message):
+            status, _ = self.request('PATCH', f'/api/messages/{message["id"]}/action-state',
+                                     {'status': 'handled'}, token=self.dsh_token)
+            self.assertEqual(status, 200)
+
+        owner_state = self.state(token=self.owner_token)
+        author_state = self.state(token=author['token'])
+        assignee_state = self.state(token=self.dsh_token)
+        stranger_state = self.state(token=stranger['token'])
+
+        self.assertEqual({row['member_id'] for row in owner_state['read_states']},
+                         {self.owner_id, author['member']['id'], self.dsh_id, stranger['member']['id']})
+        self.assertEqual({row['member_id'] for row in author_state['read_states']}, {author['member']['id']})
+        self.assertEqual({row['member_id'] for row in assignee_state['read_states']}, {self.dsh_id})
+        self.assertEqual({row['member_id'] for row in stranger_state['read_states']}, {stranger['member']['id']})
+
+        self.assertEqual(len(owner_state['action_states']), 2)
+        author_actions = author_state['action_states']
+        self.assertEqual([row['message_id'] for row in author_actions], [authored_message['id']])
+        self.assertEqual(author_actions[0]['status'], 'handled')
+        self.assertNotIn('updated_at', author_actions[0], 'authors see status but not the exact handling time')
+        self.assertEqual({row['message_id'] for row in assignee_state['action_states']},
+                         {authored_message['id'], owner_message['id']})
+        self.assertTrue(all('updated_at' in row for row in assignee_state['action_states']))
+        self.assertEqual(stranger_state['action_states'], [])
+        export_status, owner_export = self.request('GET', '/api/export', token=self.owner_token)
+        self.assertEqual(export_status, 200)
+        self.assertEqual({row['member_id'] for row in owner_export['read_states']},
+                         {self.owner_id, author['member']['id'], self.dsh_id, stranger['member']['id']})
+        self.assertEqual(len(owner_export['action_states']), 2,
+                         'organizer export must preserve the full workspace audit data')
+        self.assertEqual(self.request('GET', '/api/export', token=self.dsh_token)[0], 403)
+
+        def activity_events(token):
+            return self.request('GET', '/api/events?after=0&limit=500', token=token)[1]
+
+        owner_page = activity_events(self.owner_token)
+        author_page = activity_events(author['token'])
+        assignee_page = activity_events(self.dsh_token)
+        stranger_page = activity_events(stranger['token'])
+        owner_events = owner_page['events']
+        author_events = author_page['events']
+        assignee_events = assignee_page['events']
+        stranger_events = stranger_page['events']
+
+        def of_type(events, kind):
+            return [row for row in events if row['type'] == kind]
+
+        self.assertEqual(len(of_type(owner_events, 'member.read_state_updated')), 4)
+        self.assertEqual(len(of_type(author_events, 'member.read_state_updated')), 1)
+        self.assertEqual(len(of_type(assignee_events, 'member.read_state_updated')), 1)
+        self.assertEqual(len(of_type(stranger_events, 'member.read_state_updated')), 1)
+        self.assertEqual(len(of_type(owner_events, 'message.action_state_updated')), 2)
+        self.assertEqual(len(of_type(author_events, 'message.action_state_updated')), 1)
+        self.assertEqual(len(of_type(assignee_events, 'message.action_state_updated')), 2)
+        self.assertEqual(of_type(stranger_events, 'message.action_state_updated'), [])
+        self.assertTrue(all('created_at' in row for row in of_type(owner_events, 'message.action_state_updated')))
+        self.assertNotIn('created_at', of_type(author_events, 'message.action_state_updated')[0],
+                         'authors must not recover updated_at from the event stream')
+        self.assertIn('created_at', of_type(assignee_events, 'message.action_state_updated')[0])
+        self.assertEqual(owner_page['cursor'], author_page['cursor'])
+        self.assertEqual(owner_page['cursor'], assignee_page['cursor'])
+        self.assertEqual(owner_page['cursor'], stranger_page['cursor'],
+                         'filtered event streams still advance over hidden records')
 
     def test_read_updates_racing_out_of_order_cannot_regress(self):
         first = self.post_message('first')

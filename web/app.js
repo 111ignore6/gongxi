@@ -1,7 +1,7 @@
 import {renderMarkdown, exportThreadMarkdown, clearMarkdownCache} from './markdown.mjs';
 import {DiscussionScroll} from './scroll.mjs';
 import {planPatch} from './patch.mjs';
-import {messageEventId, readWatermark, receiptStatus, unreadCounts} from './read-state.mjs';
+import {messageEventId, readWatermark, receiptStatus, unreadCounts, visibleReadCandidate} from './read-state.mjs';
 const $ = (s, root = document) => root.querySelector(s);
 const app = $('#app');
 const modal = $('#dialog');
@@ -147,12 +147,21 @@ let discussionView = null;
 let drawerOpen = false;
 const messageNodes = new Map();
 const unreadByTopic = new Map();
+const pendingByTopic = new Map();
+function actionFeaturesOn(){return !!(state.data&&Array.isArray(state.data.action_states));}
 
 function updateUnread(d) {
   const counts = unreadCounts({topics:d.topics,messages:d.messages,
     readTracking:d.read_tracking,readStates:d.read_states,memberId:state.member?.id});
   unreadByTopic.clear();
   for (const [topicId, count] of counts) if (count > 0) unreadByTopic.set(topicId, count);
+  pendingByTopic.clear();
+  const messageById=new Map(d.messages.map(message=>[message.id,message]));
+  for(const item of d.action_states||[]){
+    const message=messageById.get(item.message_id);
+    if(item.member_id===state.member?.id&&item.status==='pending'&&message)
+      pendingByTopic.set(message.topic_id,(pendingByTopic.get(message.topic_id)||0)+1);
+  }
   const total = [...unreadByTopic.values()].reduce((a, b) => a + b, 0);
   document.title = total ? '(' + total + ') 共席 · 共同工作的研究室' : '共席 · 共同工作的研究室';
 }
@@ -170,6 +179,15 @@ function shellHTML() {
   </div>`;
 }
 
+function updateStripCue(){
+  const strip = shell && shell.strip;
+  if(!strip || !strip.isConnected) return;
+  const overflow = strip.scrollWidth - strip.clientWidth;
+  if(overflow <= 2){ strip.removeAttribute('data-cue'); return; }
+  const moreRight = overflow - strip.scrollLeft > 2;
+  strip.dataset.cue = moreRight ? 'right' : '';
+}
+
 function mountShell() {
   if (shell && app.contains(shell.main)) return;
   app.innerHTML = shellHTML();
@@ -185,13 +203,22 @@ function mountShell() {
   };
   discussionView = null;
   messageNodes.clear();
+  if(shell.strip && !shell.strip.dataset.cueBound){
+    shell.strip.dataset.cueBound = '1';
+    shell.strip.addEventListener('scroll', updateStripCue, {passive:true});
+    shell.strip.addEventListener('focusin', event => {
+      if(event.target && event.target.scrollIntoView) event.target.scrollIntoView({inline:'nearest', block:'nearest'});
+    });
+  }
+  updateStripCue();
 }
 
 function indexHTML(d) {
   const topics = d.topics.map((t, i) => {
     const n = unreadByTopic.get(t.id) || 0;
+    const p = pendingByTopic.get(t.id) || 0;
     const selected = state.view === 'discussion' && state.topic === t.id;
-    return `<button class="idx-item ${selected?'on':''}" data-topic="${esc(t.id)}"><i>${String(i+1).padStart(3,'0')}</i><span>${esc(t.title)}</span>${n?`<span class="topic-unread" aria-label="${n} 条未读">${n}</span>`:''}</button>`;
+    return `<button class="idx-item ${selected?'on':''}" data-topic="${esc(t.id)}"><i>${String(i+1).padStart(3,'0')}</i><span>${esc(t.title)}</span>${n?`<span class="topic-unread" aria-label="${n} 条未读">${n}</span>`:''}${p?`<span class="topic-pending" aria-label="${p} 条待处理">${p}</span>`:''}</button>`;
   }).join('');
   const work = [['overview','研究室总览'],['plan','共同计划'],['decisions','决定记录'],['members','参与者'],['help','使用与接入']].map(([key,label]) => `<button class="idx-item ${state.view===key?'on':''}" data-view="${key}" ${state.view===key?'aria-current="page"':''}><i>—</i><span>${label}</span></button>`).join('');
   return `<h2>议题</h2>${topics || '<p class="fine" style="padding:6px">还没有议题。</p>'}
@@ -205,8 +232,10 @@ function indexHTML(d) {
 function stripHTML(d) {
   const topics = d.topics.map((t, i) => {
     const n = unreadByTopic.get(t.id) || 0;
+    const p = pendingByTopic.get(t.id) || 0;
     const selected = state.view === 'discussion' && state.topic === t.id;
-    return `<button class="${selected?'on':''}" data-topic="${esc(t.id)}"><span class="no">${String(i+1).padStart(3,'0')}</span>${esc(t.title)}${n?` (${n})`:''}</button>`;
+    const counts=[n?`${n} 未读`:null,p?`${p} 待处理`:null].filter(Boolean).join(' · ');
+    return `<button class="${selected?'on':''}" data-topic="${esc(t.id)}"><span class="no">${String(i+1).padStart(3,'0')}</span>${esc(t.title)}${counts?` (${counts})`:''}</button>`;
   }).join('');
   const work = [['overview','研究室'],['plan','计划'],['decisions','决定'],['members','参与者'],['help','接入']].map(([key,label]) => `<button class="${state.view===key?'on':''}" data-view="${key}">${label}</button>`).join('');
   return topics + '<span class="sep"></span>' + work;
@@ -215,7 +244,8 @@ function stripHTML(d) {
 function drawerHTML(d) {
   const openTasks = d.tasks.filter(t => t.status !== 'done').length;
   const active = d.members.filter(m => !m.revoked_at).length;
-  return `<span>任务 <b>${openTasks}</b></span><span>决定 <b>${d.decisions.length}</b></span><span>参与者 <b>${active}</b></span><span class="sync-line">上次同步 <b>${date(state.lastSync)}</b></span>
+  const pending = (d.action_states||[]).filter(x=>x.member_id===state.member.id&&x.status==='pending').length;
+  return `${actionFeaturesOn()?`<span>待处理 <b>${pending}</b></span>`:''}<span>任务 <b>${openTasks}</b></span><span>决定 <b>${d.decisions.length}</b></span><span>参与者 <b>${active}</b></span><span class="sync-line">上次同步 <b>${date(state.lastSync)}</b></span>
     <button class="drawer-toggle" data-action="drawer-toggle" aria-expanded="${drawerOpen}" aria-controls="drawer-panel">${drawerOpen?'收起索引 ↓':'展开索引 ↑'}</button>`;
 }
 
@@ -223,7 +253,10 @@ function drawerPanelHTML(d) {
   const tasks = d.tasks.length ? d.tasks.map(t => `<div class="rowline">· ${esc(t.title)} <small>${esc(taskStatus(t.status))}${t.assignee_id?' · '+esc(name(t.assignee_id)):''}</small></div>`).join('') : '<div class="rowline">暂无任务</div>';
   const ds = d.decisions.length ? d.decisions.slice(-3).map(x => `<div class="rowline">· ${esc(x.title)}</div>`).join('') : '<div class="rowline">暂无决定</div>';
   const people = d.members.filter(m => !m.revoked_at).map(m => esc(m.name)).join('、');
-  return `<h3>任务</h3>${tasks}<h3>最近决定</h3>${ds}<h3>参与者</h3><div class="rowline">${people}</div>`;
+  const messages=new Map(d.messages.map(m=>[m.id,m]));
+  const pending=(d.action_states||[]).filter(x=>x.member_id===state.member.id&&x.status==='pending'&&messages.has(x.message_id));
+  const inbox=pending.length?pending.map(item=>{const m=messages.get(item.message_id);return `<button class="rowline pending-action-link" data-topic="${esc(m.topic_id)}" data-scroll-message="${esc(m.id)}">· ${esc(topicName(m.topic_id))} · ${esc(m.body.slice(0,72))}${m.body.length>72?'…':''}<small>待处理 · ${date(item.updated_at)}</small></button>`;}).join(''):'<div class="rowline">当前没有待处理消息。</div>';
+  return `${actionFeaturesOn()?`<h3>我的待处理</h3>${inbox}`:''}<h3>任务</h3>${tasks}<h3>最近决定</h3>${ds}<h3>参与者</h3><div class="rowline">${people}</div>`;
 }
 
 function updateShell() {
@@ -235,8 +268,9 @@ function updateShell() {
       : active.dataset.action ? `[data-action="${CSS.escape(active.dataset.action)}"]` : null)
     : null;
   setRegion(shell.spaceName, `${esc(d.workspace.name)}<small> · ${d.members.filter(m=>!m.revoked_at).length} 位成员</small>`, d.workspace.name + '|' + d.members.filter(m=>!m.revoked_at).length);
-  setRegion(shell.strip, stripHTML(d), state.view + '|' + state.topic + '|' + d.topics.map(t => t.id + ':' + t.title + ':' + (unreadByTopic.get(t.id)||0)).join('|'));
-  setRegion(shell.index, indexHTML(d), state.view + '|' + state.topic + '|' + d.topics.map(t => t.id + ':' + t.title + ':' + (unreadByTopic.get(t.id)||0)).join('|') + '|' + d.workspace.name);
+  setRegion(shell.strip, stripHTML(d), state.view + '|' + state.topic + '|' + d.topics.map(t => t.id + ':' + t.title + ':' + (unreadByTopic.get(t.id)||0) + ':' + (pendingByTopic.get(t.id)||0)).join('|'));
+  updateStripCue();
+  setRegion(shell.index, indexHTML(d), state.view + '|' + state.topic + '|' + d.topics.map(t => t.id + ':' + t.title + ':' + (unreadByTopic.get(t.id)||0) + ':' + (pendingByTopic.get(t.id)||0)).join('|') + '|' + d.workspace.name);
   const userNode = $('#sidebar-user', app);
   if (userNode) setRegion(userNode, `${avatar(state.member)}<div><strong>${esc(state.member.name)}</strong><small>${owner()?'人类 · 组织者':state.member.kind==='ai'?'AI · 参与者':'人类 · 参与者'}</small></div><button class="icon-button" data-action="logout" aria-label="退出当前身份">${icon('exit')}</button>`, [state.member.name, state.member.kind, state.member.role].join('|'));
   const conn = $('#connection-label', app);
@@ -288,6 +322,13 @@ function discussionSkeleton(t) {
   return `<div class="discussion"><section class="thread"><header class="thread-heading" id="thread-heading"></header><div id="direction-slot"></div><div id="tracking-slot"></div><div class="messages" id="message-list"></div><form id="message-form" class="composer"><div id="reply-slot"></div><div class="composer-tools"><div class="composer-tabs" role="group" aria-label="编辑模式"><button type="button" data-action="compose-edit" aria-pressed="${!previewing}" class="${!previewing?'active':''}">编辑</button><button type="button" data-action="compose-preview" aria-pressed="${previewing}" class="${previewing?'active':''}">预览</button></div><span class="fine">支持 Markdown · Ctrl / ⌘ + Enter 发表</span></div><label class="field" ${previewing?'hidden':''}><span class="sr-only">发表你的看法</span><textarea id="message-draft" name="body" placeholder="提出看法、追问，或带来新的依据…" required maxlength="20000">${esc(getDraft(t.id))}</textarea></label><div id="message-preview" class="composer-preview markdown-body" ${!previewing?'hidden':''} aria-label="发言预览"></div><div class="form-error" role="alert"></div><footer class="composer-foot"><span>以 ${esc(state.member.name)} 发言<br>发出消息不代表其他 AI 已读取或回应</span><button class="button primary" type="submit">发表 ${icon('arrow')}</button></footer></form></section><aside class="context-rail" id="context-rail"></aside></div>`;
 }
 
+function actionTargetsHTML(){
+  if(!actionFeaturesOn())return '';
+  const members=state.data.members.filter(m=>!m.revoked_at);
+  if(!members.length)return '';
+  return `<details class="action-target-picker"><summary>需要谁处理？（可选）</summary><div class="action-target-list">${members.map(m=>`<label><input type="checkbox" name="action_for" value="${esc(m.id)}"><span>${esc(m.name)}${m.id===state.member.id?' · 我':''}</span></label>`).join('')}</div><p class="fine">只会提醒明确选择的成员；普通发言不会自动变成待办。</p></details>`;
+}
+
 function authorSignature(id) {
   const a = member(id);
   return [a.name || '', a.kind || '', a.role || '', a.revoked_at ? '1' : '0'].join('|');
@@ -319,8 +360,8 @@ function diffMessages(messages) {
       const byline = el.querySelector('.byline');
       if (byline) byline.innerHTML = bylineHTML(m);
     }
-    const receiptSlot=el.querySelector('.receipt-slot');
-    if(receiptSlot)receiptSlot.innerHTML=receiptsHTML(m);
+    const stateSlot=el.querySelector('.message-state-slot');
+    if(stateSlot)stateSlot.innerHTML=messageActionHTML(m)+receiptsHTML(m);
     cursor = el;
   }
   for (const id of planPatch([...messageNodes.keys()], messages.map(m => m.id)).remove) {
@@ -342,8 +383,11 @@ function updateDiscussion() {
       tracking: $('#tracking-slot'),
       list: $('#message-list'),
       replySlot: $('#reply-slot'),
+      actionTargets: null,
       rail: $('#context-rail')
     };
+    const composerTools=$('#message-form .composer-tools');
+    if(composerTools){const slot=document.createElement('div');slot.id='action-target-slot';composerTools.after(slot);discussionView.actionTargets=slot;}
     messageNodes.clear();
   }
   const messages = state.data.messages.filter(m => m.topic_id === t.id);
@@ -352,6 +396,8 @@ function updateDiscussion() {
   discussionView.heading.innerHTML = threadHeadingHTML(t, messages.length);
   setRegion(discussionView.banner, directionBanner(), 'v' + state.data.direction.revision + '|' + acked() + '|' + ackCount() + '|' + directionOpen);
   setRegion(discussionView.tracking, trackingNoteHTML(), JSON.stringify(state.data.read_tracking || null));
+  const targetKey=state.data.members.filter(m=>!m.revoked_at).map(m=>m.id+':'+m.name).join('|');
+  setRegion(discussionView.actionTargets, actionTargetsHTML(), targetKey);
   diffMessages(messages);
   discussionView.replySlot.innerHTML = replyBarHTML();
   applyComposerMode();
@@ -394,15 +440,24 @@ function readTrackingOn(){return !!(state.data && state.data.read_tracking && Ar
 function readStates(){return state.data && Array.isArray(state.data.read_states) ? state.data.read_states : null;}
 function receiptsHTML(m){
   if(!readTrackingOn() || !readStates()) return '';
-  if(receiptStatus(m,state.data.read_tracking,readStates(),state.member.id)==='unknown') return '';
-  const seen=[]; const unseen=[];
-  for(const mem of state.data.members.filter(x=>!x.revoked_at)){
-    const status=receiptStatus(m,state.data.read_tracking,readStates(),mem.id);
-    const watermark=readWatermark(readStates(),mem.id,m.topic_id);
-    if(status==='read') seen.push({mem,at:watermark?.at}); else if(status==='unread') unseen.push({mem});
+  const tracking = state.data.read_tracking;
+  const states = state.data.read_states;
+  const chips = [];
+  const canSeeAll = owner();
+  for (const mem of state.data.members.filter(x => !x.revoked_at)) {
+    if (mem.id === state.member?.id) continue;
+    const row = states.find(r => r.member_id === mem.id && r.topic_id === m.topic_id);
+    if (!row && !canSeeAll) continue;
+    const status = receiptStatus(m, tracking, states, mem.id);
+    if (status === 'unknown') continue;
+    if (status === 'read') {
+      const wm = readWatermark(states, mem.id, m.topic_id);
+      chips.push(`<span class="receipt seen">已读 · ${esc(mem.name)} ${wm && wm.at ? date(wm.at) : ''}</span>`);
+    } else {
+      chips.push(`<span class="receipt unseen">未读 · ${esc(mem.name)}</span>`);
+    }
   }
-  if(!seen.length && !unseen.length) return '';
-  const chips=[...seen.map(x=>`<span class="receipt seen">已读 · ${esc(x.mem.name)} ${x.at?date(x.at):''}</span>`), ...unseen.map(x=>`<span class="receipt unseen">未读 · ${esc(x.mem.name)}</span>`)];
+  if(!chips.length) return '';
   return `<div class="message-receipts" aria-label="阅读状态">${chips.join('')}</div>`;
 }
 let readMarkTimer=null;
@@ -413,6 +468,23 @@ function stopReadObservation(){
   clearTimeout(readMarkTimer);readMarkTimer=null;
   readObserver?.disconnect();readObserver=null;
   visibleReadMessages.clear();
+}
+function queueVisibleReadMark(topicId,delay=900){
+  if(readMarkTimer||!visibleReadMessages.size)return;
+  readMarkTimer=setTimeout(async()=>{
+    readMarkTimer=null;
+    if(state.view!=='discussion'||state.topic!==topicId||!readTrackingOn())return;
+    const now=performance.now();
+    const entries=[...visibleReadMessages.values()];
+    const watermark=readWatermark(readStates(),state.member.id,topicId);
+    const candidate=visibleReadCandidate(entries,watermark?.event,now);
+    if(!candidate.message){if(candidate.waitMs!==null)queueVisibleReadMark(topicId,candidate.waitMs);return;}
+    const target=candidate.message;
+    readMarkSending=true;
+    try{await api('/read-state',{method:'POST',body:JSON.stringify({topic_id:topicId,message_id:target.id})});await refresh(true);}
+    catch{}
+    finally{readMarkSending=false;}
+  },delay);
 }
 function scheduleReadMark(){
   stopReadObservation();
@@ -429,23 +501,7 @@ function scheduleReadMark(){
         if(!visibleReadMessages.has(messageId)) visibleReadMessages.set(messageId,{message:byId.get(messageId),since:performance.now()});
       }else visibleReadMessages.delete(messageId);
     }
-    if(readMarkTimer || !visibleReadMessages.size) return;
-    const topicId=state.topic;
-    readMarkTimer=setTimeout(async()=>{
-      readMarkTimer=null;
-      if(state.view!=='discussion' || state.topic!==topicId || !readTrackingOn()) return;
-      const now=performance.now();
-      const visible=[...visibleReadMessages.values()].filter(item=>now-item.since>=850);
-      if(!visible.length) return;
-      visible.sort((a,b)=>messageEventId(a.message)-messageEventId(b.message));
-      const target=visible[visible.length-1].message;
-      const watermark=readWatermark(readStates(),state.member.id,topicId);
-      if(watermark && watermark.event>=messageEventId(target)) return;
-      readMarkSending=true;
-      try{await api('/read-state',{method:'POST',body:JSON.stringify({topic_id:topicId,message_id:target.id})});await refresh(true);}
-      catch{}
-      finally{readMarkSending=false;}
-    },900);
+    if(visibleReadMessages.size)queueVisibleReadMark(state.topic);
   },{root:main,threshold:0.05});
   for(const message of rows){const node=document.getElementById(`message-${message.id}`);if(node)readObserver.observe(node);}
 }
@@ -457,23 +513,36 @@ function trackingNoteHTML(){
 }
 
 
-function memberLastReadHTML(m){
-  if(!readTrackingOn() || !readStates()) return '';
-  const mine=readStates().filter(r=>r.member_id===m.id && (r.read_at || r.at));
-  if(!mine.length) return '';
-  const latest=mine.reduce((a,b)=>(String(b.read_at||b.at)>String(a.read_at||a.at)?b:a));
-  const topic=latest.topic_id ? topicName(latest.topic_id) : '';
-  return `<dt>最后阅读</dt><dd>${date(latest.read_at||latest.at)}${topic?` · ${esc(topic)}`:''}</dd>`;
-}
-
 function bylineHTML(m) {
   const author = member(m.author_id);
   return `<strong>${esc(author.name)}</strong><span class="badge">${author.kind==='ai'?'AI':'人类'}${author.revoked_at?' · 已撤销':''}</span>${author.role==='owner'?'<span class="fine">组织者</span>':''}<time datetime="${esc(m.created_at)}">${date(m.created_at)}</time>`;
 }
 
+function messageActionHTML(m){
+  if(!actionFeaturesOn())return '';
+  const targets = (m.action_for || []).filter(Boolean);
+  if (!targets.length) return '';
+  const states = state.data.action_states || [];
+  const labels = {pending: '待处理', handled: '已处理', no_action: '无需处理'};
+  const rows = targets.map(id => {
+    const mem = member(id);
+    if (!mem) return '';
+    const hit = states.find(s => s.message_id === m.id && s.member_id === id);
+    if (!hit && id !== (state.member && state.member.id) && !owner()) return '';
+    const status = hit ? hit.status : 'pending';
+    const mine = id === (state.member && state.member.id);
+    const controls = mine
+      ? `<span class="message-action-controls">${['handled','no_action','pending'].filter(s => s !== status).map(s =>
+          `<button type="button" data-message-id="${esc(m.id)}" data-action-status="${s}">${s === 'handled' ? '标记已处理' : s === 'no_action' ? '无需处理' : '恢复待处理'}</button>`).join('')}</span>`
+      : '';
+    return `<div class="message-action-row"><span>${esc(mem.name)} · ${labels[status] || status}</span>${controls}</div>`;
+  }).join('');
+  return rows ? `<div class="message-action-state"><strong>处理状态</strong>${rows}</div>` : '';
+}
+
 function messageEntry(m) {
   const author=member(m.author_id); const quote=m.reply_to&&state.data.messages.find(x=>x.id===m.reply_to);
-  return `<article class="message" id="message-${esc(m.id)}">${avatar(author)}<div class="message-body"><header class="byline">${bylineHTML(m)}</header>${quote?`<blockquote><button class="text-button" data-jump="${esc(quote.id)}">引用 ${esc(name(quote.author_id))}</button><br>${esc(quote.body.slice(0,250))}${quote.body.length>250?'…':''}</blockquote>`:''}<div class="message-copy markdown-body">${renderMarkdown(m.body)}</div><footer class="message-actions"><button data-reply="${esc(m.id)}">回复 / 引用</button><button data-copy-message="${esc(m.id)}">复制内容</button></footer><div class="receipt-slot">${receiptsHTML(m)}</div></div></article>`;
+  return `<article class="message" id="message-${esc(m.id)}">${avatar(author)}<div class="message-body"><header class="byline">${bylineHTML(m)}</header>${quote?`<blockquote><button class="text-button" data-jump="${esc(quote.id)}">引用 ${esc(name(quote.author_id))}</button><br>${esc(quote.body.slice(0,250))}${quote.body.length>250?'…':''}</blockquote>`:''}<div class="message-copy markdown-body">${renderMarkdown(m.body)}</div><footer class="message-actions"><button data-reply="${esc(m.id)}">回复 / 引用</button><button data-copy-message="${esc(m.id)}">复制内容</button></footer><div class="message-state-slot">${messageActionHTML(m)}${receiptsHTML(m)}</div></div></article>`;
 }
 function taskEntry(t) {
   const canEdit=owner()||t.assignee_id===state.member.id;
@@ -481,7 +550,7 @@ function taskEntry(t) {
 }
 function plans() {const ts=state.data.tasks;return `<div class="page">${heading('SHARED PLAN / 共同计划','接下来，一起把它做实。','认领表示负责；已完成由成员明确标记，不代表平台验证了工作成果。',button(`${icon('plus')} 添加任务`,'new-task','primary'))}${ts.length?ts.slice().reverse().map(taskEntry).join(''):empty('计划，从明确的问题里生长。','为工作写下标题、背景和完成要求，再由成员认领。',button('添加第一个任务','new-task','primary'))}</div>`;}
 function decisions() {const ds=state.data.decisions;return `<div class="page">${heading('DECISION JOURNAL / 决定记录','每个决定，都有来处。','由组织者明确记录依据与边界；不把普通发言自动变成共识。',owner()?button(`${icon('plus')} 记录决定`,'new-decision','primary'):'')}${ds.length?ds.slice().reverse().map((d,i)=>`<article class="entry"><span class="entry-number">D—${String(ds.length-i).padStart(3,'0')}</span><div class="entry-content"><span class="badge green">组织者记录 · 方向 v${d.direction_revision}</span><h2>${esc(d.title)}</h2><p>${esc(d.body)}</p><footer><span>${esc(name(d.created_by))} · ${date(d.created_at)}</span>${d.topic_id?`<button class="text-button" data-topic="${esc(d.topic_id)}">回到 ${esc(topicName(d.topic_id))} →</button>`:''}</footer></div></article>`).join(''):empty('还没有记录决定。','讨论可以保留分歧。准备明确方向时，由组织者写下决定和依据。',owner()?button('记录第一个决定','new-decision','primary'):'')}</div>`;}
-function memberCard(m) { const d=state.data; return `<article class="card member-card"><div class="row spread">${avatar(m)}<span class="badge ${m.revoked_at?'danger':''}">${m.kind==='ai'?'AI':'人类'}${m.role==='owner'?' · 组织者':''}${m.revoked_at?' · 已撤销':''}</span></div><h2>${esc(m.name)}</h2><p>${esc(m.description||'尚未补充介绍。')}</p><dl>${memberLastReadHTML(m)}<dt>最近请求</dt><dd>${date(m.last_seen_at)}<br><span class="fine">不代表在线或执行中</span></dd><dt>加入时间</dt><dd>${date(m.created_at)}</dd><dt>方向确认</dt><dd>${!d.direction.revision?'尚未发布':d.acknowledgements.some(a=>a.member_id===m.id&&a.revision===d.direction.revision)?`已确认 v${d.direction.revision}`:`等待确认 v${d.direction.revision}`}</dd></dl>${owner()&&m.id!==state.member.id&&!m.revoked_at?`<button class="button danger" data-revoke="${esc(m.id)}">撤销访问</button>`:''}</article>`; }
+function memberCard(m) { const d=state.data; return `<article class="card member-card"><div class="row spread">${avatar(m)}<span class="badge ${m.revoked_at?'danger':''}">${m.kind==='ai'?'AI':'人类'}${m.role==='owner'?' · 组织者':''}${m.revoked_at?' · 已撤销':''}</span></div><h2>${esc(m.name)}</h2><p>${esc(m.description||'尚未补充介绍。')}</p><dl><dt>最近请求</dt><dd>${date(m.last_seen_at)}<br><span class="fine">不代表在线或执行中</span></dd><dt>加入时间</dt><dd>${date(m.created_at)}</dd><dt>方向确认</dt><dd>${!d.direction.revision?'尚未发布':d.acknowledgements.some(a=>a.member_id===m.id&&a.revision===d.direction.revision)?`已确认 v${d.direction.revision}`:`等待确认 v${d.direction.revision}`}</dd></dl>${owner()&&m.id!==state.member.id&&!m.revoked_at?`<button class="button danger" data-revoke="${esc(m.id)}">撤销访问</button>`:''}</article>`; }
 function members() {
   const d=state.data;
   const active=d.members.filter(m=>!m.revoked_at);
@@ -722,10 +791,12 @@ async function submit(form,event) {
       case 'topic-form': {const created=await post('/topics',values);closeDialog();await refresh();navigate('discussion',created.id);toast('议题已创建。');break;}
       case 'message-form': {
         const sentTopic=state.topic;
-        const signature=JSON.stringify([sentTopic,values.body,state.reply]);
+        const actionFor=[...form.querySelectorAll('input[name="action_for"]:checked')].map(input=>input.value).sort();
+        const signature=JSON.stringify([sentTopic,values.body,state.reply,actionFor]);
         if(!pendingMessages.has(signature)){pendingMessages.set(signature,crypto.randomUUID());savePendingMessages();}
         messageSend={signature, topic:sentTopic, body:values.body, beforeIds:new Set(state.data.messages.map(m=>m.id))};
         const payload={topic_id:sentTopic,body:values.body,reply_to:state.reply||undefined,idempotency_key:pendingMessages.get(signature)};
+        if(actionFeaturesOn())payload.action_for=actionFor;
         await post('/messages',payload);
         if(getDraft(sentTopic)===values.body)saveDraft(sentTopic,'');
         if(state.view==='discussion' && state.topic===sentTopic){
@@ -771,6 +842,13 @@ async function performAction(el) {
   const act = el.dataset ? el.dataset.action : '';
   if (act === 'drawer-toggle') { drawerOpen = !drawerOpen; updateShell(); return; }
   if (act === 'drawer-open') { drawerOpen = true; updateShell(); return; }
+  if(el.dataset.actionStatus){
+    el.disabled=true;
+    await patch(`/messages/${encodeURIComponent(el.dataset.messageId)}/action-state`,{status:el.dataset.actionStatus});
+    await refresh(true);
+    toast(el.dataset.actionStatus==='pending'?'已恢复为待处理。':el.dataset.actionStatus==='handled'?'已标记处理完成。':'已标记无需处理。');
+    return;
+  }
   const action=el.dataset.action;
 
     if(el.dataset.view){navigate(el.dataset.view);return;}
@@ -778,7 +856,7 @@ async function performAction(el) {
     if(el.dataset.reply){const snap=captureUI();state.reply=el.dataset.reply;render();restoreUI(snap);$('#message-draft')?.focus();return;}
     if(el.dataset.jump){document.getElementById(`message-${el.dataset.jump}`)?.scrollIntoView({block:'center',behavior:'smooth'});return;}
     if(el.dataset.copyMessage){await copy(state.data.messages.find(m=>m.id===el.dataset.copyMessage)?.body||'');return;}
-    if(el.dataset.claim||el.dataset.release){el.disabled=true;const id=el.dataset.claim||el.dataset.release;await patch(`/tasks/${id}`,el.dataset.claim?{assignee_id:state.member.id}:{assignee_id:null,status:'open'});await refresh(true);toast(el.dataset.claim?'已由你认领。':'任务已释放。');return;}
+    if(el.dataset.claim||el.dataset.release){el.disabled=true;const id=el.dataset.claim||el.dataset.release;const seen=state.data.tasks.find(t=>t.id===id);const expected=seen&&seen.updated_at?{expected_updated_at:seen.updated_at}:{};try{await patch(`/tasks/${id}`,el.dataset.claim?{assignee_id:state.member.id,...expected}:{assignee_id:null,status:'open',...expected});}catch(error){if(error.status===409){await refresh(true).catch(()=>{});const failure=new Error('任务状态已变化，请按最新卡片重新操作。');failure.noRetry=true;throw failure;}throw error;}await refresh(true);toast(el.dataset.claim?'已由你认领。':'任务已释放。');return;}
     if(el.dataset.revoke){const id=el.dataset.revoke;openDialog('撤销这位成员的访问？',`<p>“${esc(name(id))}”的身份凭证会立即失效。已有发言与工作记录保留。此操作不能恢复原凭证；需要重新邀请。</p><form id="revoke-form" data-member="${esc(id)}"><div class="form-error" role="alert"></div><div class="dialog-footer"><button type="button" class="button" data-action="close-dialog">取消</button><button type="submit" class="button danger">确认撤销访问</button></div></form>`);return;}
     switch(action){
       case 'copy-code':await copy(el.closest('.markdown-code-block').querySelector('pre code').textContent);break;
@@ -837,7 +915,7 @@ document.addEventListener('click',async event=>{
     catch(err){ actionFailed(err.message,retry); toast(err.message); }
   };
   try { await performAction(el); actionSucceeded(); }
-  catch(error){actionFailed(error.message,retry);toast(error.message);if(el.isConnected)el.disabled=false;}
+  catch(error){if(error.noRetry){actionFailed(error.message);if(el.isConnected)el.disabled=false;return;}actionFailed(error.message,retry);toast(error.message);if(el.isConnected)el.disabled=false;}
 });
 function updateActionError() {
   const slot = $('#action-error');
@@ -858,7 +936,9 @@ function actionSucceeded() {
 
 function submitTaskChange(el) {
   const id = el.dataset.taskStatus || el.dataset.taskAssignee;
-  const payload = el.dataset.taskStatus ? {status: el.value} : {assignee_id: el.value || null};
+  const seen = state.data.tasks.find(t => t.id === id);
+  const expected = seen && seen.updated_at ? {expected_updated_at: seen.updated_at} : {};
+  const payload = el.dataset.taskStatus ? {status: el.value, ...expected} : {assignee_id: el.value || null, ...expected};
   const run = async () => {
     el.disabled = true;
     try {
@@ -867,8 +947,12 @@ function submitTaskChange(el) {
       await refresh(true);
       toast('任务已更新。');
     } catch (error) {
-      actionFailed(error.message, run);
       await refresh(true).catch(() => {});
+      if (error.status === 409) {
+        actionFailed('任务已被他人修改，请按刷新后的版本重新选择。');
+        return;
+      }
+      actionFailed(error.message, run);
     } finally {
       el.disabled = false;
     }
@@ -880,6 +964,7 @@ document.addEventListener('change', async event => {
   const el = event.target;
   if (el.matches('[data-theme-picker]')) { window.GongxiTheme?.setPreference(el.value); return; }
   if (el.id === 'credential-file') { const file = el.files?.[0]; if (file) await importCredentialFile(file); el.value = ''; return; }
+  if(el.name==='action_for'&&el.checked&&document.querySelectorAll('input[name="action_for"]:checked').length>32){el.checked=false;toast('一条消息最多指派 32 位成员。');return;}
   if (!el.dataset.taskStatus && !el.dataset.taskAssignee) return;
   submitTaskChange(el);
 });

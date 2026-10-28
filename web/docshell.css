@@ -82,3 +82,10 @@ body:has(.docshell){height:100%;overflow:hidden}
 /* the jump button floats above the drawer, never over it */
 .jump-latest{right:24px;bottom:calc(var(--drawer-h) + 18px);z-index:20}
 @media(max-width:980px){.jump-latest{right:16px;bottom:calc(var(--drawer-h) + 14px)}}
+
+/* cue that more views continue off the right edge of the mobile strip */
+@media(max-width:980px){
+  .topicstrip{scrollbar-width:none}
+  .topicstrip::-webkit-scrollbar{display:none}
+  .topicstrip[data-cue="right"]{mask-image:linear-gradient(to right,#000 0,#000 calc(100% - 30px),transparent 100%);-webkit-mask-image:linear-gradient(to right,#000 0,#000 calc(100% - 30px),transparent 100%);transition:mask-image .2s ease}
+}
