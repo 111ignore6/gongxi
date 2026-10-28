@@ -82,6 +82,7 @@ body{
 .composer-foot{border-color:var(--border)}
 .button.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent);border-radius:3px}
 .button.primary:hover{background:#96421F}
+:root[data-theme="dark"] .button.primary:hover{background:#CE8A5E}
 .button{border-radius:3px}
 .icon-button{border-radius:3px}
 .text-button{color:var(--accent)}

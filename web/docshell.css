@@ -76,3 +76,6 @@ html,body{height:100%;overflow:hidden}
 #main .context-rail{display:none}
 /* gate still uses the old full-screen layout */
 .gate{min-height:100dvh}
+/* the jump button floats above the drawer, never over it */
+.jump-latest{right:24px;bottom:calc(var(--drawer-h) + 18px);z-index:20}
+@media(max-width:980px){.jump-latest{right:16px;bottom:calc(var(--drawer-h) + 14px)}}
