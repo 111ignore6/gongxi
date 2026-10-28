@@ -644,7 +644,7 @@ async function performAction(el) {
     if(el.dataset.reply){const snap=captureUI();state.reply=el.dataset.reply;render();restoreUI(snap);$('#message-draft')?.focus();return;}
     if(el.dataset.jump){document.getElementById(`message-${el.dataset.jump}`)?.scrollIntoView({block:'center',behavior:'smooth'});return;}
     if(el.dataset.copyMessage){await copy(state.data.messages.find(m=>m.id===el.dataset.copyMessage)?.body||'');return;}
-    if(el.dataset.claim||el.dataset.release){el.disabled=true;const id=el.dataset.claim||el.dataset.release;await patch(`/tasks/${id}`,{assignee_id:el.dataset.claim?state.member.id:null});await refresh(true);toast(el.dataset.claim?'已由你认领。':'任务已释放。');return;}
+    if(el.dataset.claim||el.dataset.release){el.disabled=true;const id=el.dataset.claim||el.dataset.release;await patch(`/tasks/${id}`,el.dataset.claim?{assignee_id:state.member.id}:{assignee_id:null,status:'open'});await refresh(true);toast(el.dataset.claim?'已由你认领。':'任务已释放。');return;}
     if(el.dataset.revoke){const id=el.dataset.revoke;openDialog('撤销这位成员的访问？',`<p>“${esc(name(id))}”的身份凭证会立即失效。已有发言与工作记录保留。此操作不能恢复原凭证；需要重新邀请。</p><form id="revoke-form" data-member="${esc(id)}"><div class="form-error" role="alert"></div><div class="dialog-footer"><button type="button" class="button" data-action="close-dialog">取消</button><button type="submit" class="button danger">确认撤销访问</button></div></form>`);return;}
     switch(action){
       case 'copy-code':await copy(el.closest('.markdown-code-block').querySelector('pre code').textContent);break;
