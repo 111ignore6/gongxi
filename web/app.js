@@ -1,5 +1,6 @@
 import {renderMarkdown, exportThreadMarkdown, clearMarkdownCache} from './markdown.mjs';
 import {DiscussionScroll} from './scroll.mjs';
+import {planPatch} from './patch.mjs';
 const $ = (s, root = document) => root.querySelector(s);
 const app = $('#app');
 const modal = $('#dialog');
@@ -115,13 +116,14 @@ function render(preserve = false) {
   if(preserve&&composing){deferredRender=true;return;}
   const reading = discussionScroll.capture();
   const snapshot = preserve ? captureUI() : null;
-  if (!state.data) renderGate(); else renderWorkspace();
-  if(state.data){const bottom=$('.sidebar-bottom');bottom?.insertAdjacentHTML('afterbegin','<button class="text-button" style="padding:10px" data-action="save-credential">保存我的凭证</button>');}
+  if (!state.data) { resetRegions(); renderGate(); }
+  else { mountShell(); updateShell(); updatePage(); }
   updatePreview();
   restoreUI(snapshot);
   discussionScroll.afterRender(reading);
 }
 function renderGate() {
+  resetRegions();
   let content;
   if (state.gate === 'credentials') return;
   if (pendingEnrollment) content = `<div class="eyebrow">RECOVER / 保留你的席位</div><h2>申请结果还需要确认。</h2><p class="muted">${esc(pendingEnrollment.payload.name)} 的恢复凭证已保存在当前来源的标签页会话中。即使服务器已创建身份但回复丢失，也可用它恢复。</p><div class="flow" style="margin-top:24px">${state.error?`<div class="error" role="alert">${esc(state.error)}</div>`:''}<div class="credentials">${field('待恢复身份凭证',`<input id="pending-credential" type="password" readonly value="${esc(pendingEnrollment.token)}" autocomplete="off">`)}<div class="row" style="margin-top:14px"><button class="button" data-action="show-pending">显示 / 隐藏</button><button class="button" data-action="copy-pending">复制并保存凭证</button></div></div><button class="button primary" data-action="recover-enrollment">检查并恢复身份</button><button class="button" data-action="retry-enrollment">重试原始申请</button><button class="text-button" data-action="cancel-enrollment">检查后返回修改申请</button><p class="fine">重试使用相同凭证，不会因网络错误自动换一个身份。关闭当前标签页会话前请先复制并保存凭证。</p></div>`;
@@ -137,9 +139,126 @@ function renderGate() {
 function nav() {
   return Object.entries(views).filter(([k])=>k!=='search').map(([key,[label,ico]]) => `<button class="nav-item ${state.view === key ? 'active' : ''}" data-view="${key}" ${state.view === key ? 'aria-current="page"' : ''}>${icon(ico)}${label}</button>`).join('');
 }
-function renderWorkspace() {
+let shell = null;
+let discussionView = null;
+const messageNodes = new Map();
+
+function resetRegions(){ shell = null; discussionView = null; messageNodes.clear(); }
+
+function shellHTML() {
+  return `<div class="mobile-scrim ${state.mobile ? 'open' : ''}" data-action="close-menu"></div><div class="layout"><aside class="sidebar ${state.mobile ? 'open' : ''}" aria-label="研究室导航">${brand()}<div class="space-name" id="space-name"></div><nav class="main-nav" aria-label="主导航" id="main-nav"></nav><div class="sidebar-label">最近的议题</div><div id="topic-list"></div><button class="text-button" style="padding:15px 12px" data-action="new-topic">${icon('plus')} 新建议题</button><div class="sidebar-bottom"><button class="text-button" style="padding:10px" data-action="save-credential">保存我的凭证</button><div class="connection"><span class="signal"></span><span id="connection-label"></span></div><div class="sidebar-user" id="sidebar-user"></div></div></aside><section class="workspace"><header class="workspace-header"><button class="icon-button mobile-menu" data-action="menu" aria-label="打开导航" aria-expanded="${state.mobile}">${icon('menu')}</button><div class="breadcrumb" id="breadcrumb"></div><div class="header-actions">${themePicker()}<button class="icon-button" data-view="search" aria-label="搜索工作区">${icon('search')}</button>${owner()?button('邀请参与者','invite'):''}</div></header><div id="error-slot"></div><main id="main" tabindex="-1"></main></section></div>`;
+}
+
+function mountShell() {
+  if (shell && app.contains(shell.main)) return;
+  app.innerHTML = shellHTML();
+  shell = {
+    scrim: $('.mobile-scrim', app),
+    sidebar: $('.sidebar', app),
+    spaceName: $('#space-name', app),
+    nav: $('#main-nav', app),
+    topicList: $('#topic-list', app),
+    connection: $('#connection-label', app),
+    signal: $('.signal', app),
+    user: $('#sidebar-user', app),
+    breadcrumb: $('#breadcrumb', app),
+    errorSlot: $('#error-slot', app),
+    main: $('#main', app),
+    menuButton: $('.mobile-menu', app)
+  };
+  discussionView = null;
+  messageNodes.clear();
+}
+
+function updateShell() {
   const d = state.data;
-  app.innerHTML = `<div class="mobile-scrim ${state.mobile ? 'open' : ''}" data-action="close-menu"></div><div class="layout"><aside class="sidebar ${state.mobile ? 'open' : ''}" aria-label="研究室导航">${brand()}<div class="space-name"><strong>${esc(d.workspace.name)}</strong><small>独立协作空间 · ${d.members.filter(m=>!m.revoked_at).length} 位成员</small></div><nav class="main-nav" aria-label="主导航">${nav()}</nav><div class="sidebar-label">最近的议题</div><div>${d.topics.slice(-6).reverse().map(t=>`<button class="topic-link ${state.view==='discussion'&&state.topic===t.id?'selected':''}" data-topic="${esc(t.id)}">${esc(t.title)}</button>`).join('') || '<p class="fine" style="padding:0 12px">还没有议题。为第一种看法，写一个开头。</p>'}</div><button class="text-button" style="padding:15px 12px" data-action="new-topic">${icon('plus')} 新建议题</button><div class="sidebar-bottom"><div class="connection"><span class="signal ${state.offline?'offline':''}"></span><span id="connection-label">${state.offline?'连接暂时中断 · 自动重试中':`上次同步 ${date(state.lastSync)}<br>每 5 秒检查更新，不代表 AI 在线`}</span></div><div class="sidebar-user">${avatar(state.member)}<div><strong>${esc(state.member.name)}</strong><small>${owner()?'人类 · 组织者':state.member.kind==='ai'?'AI · 参与者':'人类 · 参与者'}</small></div><button class="icon-button" data-action="logout" aria-label="退出当前身份">${icon('exit')}</button></div></div></aside><section class="workspace"><header class="workspace-header"><button class="icon-button mobile-menu" data-action="menu" aria-label="打开导航" aria-expanded="${state.mobile}">${icon('menu')}</button><div class="breadcrumb">研究室<span>/</span>${views[state.view]?.[0]||'研究室'}</div><div class="header-actions">${themePicker()}<button class="icon-button" data-view="search" aria-label="搜索工作区">${icon('search')}</button>${owner()?button('邀请参与者','invite'):''}</div></header>${state.error?`<div class="error error-banner" role="alert">${esc(state.error)} <button class="text-button" data-action="retry">重试</button></div>`:''}<main id="main" tabindex="-1">${pageContent()}</main></section></div>`;
+  shell.scrim.classList.toggle('open', Boolean(state.mobile));
+  shell.sidebar.classList.toggle('open', Boolean(state.mobile));
+  shell.menuButton.setAttribute('aria-expanded', String(Boolean(state.mobile)));
+  shell.spaceName.innerHTML = `<strong>${esc(d.workspace.name)}</strong><small>独立协作空间 · ${d.members.filter(m=>!m.revoked_at).length} 位成员</small>`;
+  shell.nav.innerHTML = nav();
+  shell.topicList.innerHTML = d.topics.slice(-6).reverse().map(t=>`<button class="topic-link ${state.view==='discussion'&&state.topic===t.id?'selected':''}" data-topic="${esc(t.id)}">${esc(t.title)}</button>`).join('') || '<p class="fine" style="padding:0 12px">还没有议题。为第一种看法，写一个开头。</p>';
+  shell.connection.innerHTML = state.offline ? '连接暂时中断 · 自动重试中' : `上次同步 ${date(state.lastSync)}<br>每 5 秒检查更新，不代表 AI 在线`;
+  shell.signal.classList.toggle('offline', Boolean(state.offline));
+  shell.user.innerHTML = `${avatar(state.member)}<div><strong>${esc(state.member.name)}</strong><small>${owner()?'人类 · 组织者':state.member.kind==='ai'?'AI · 参与者':'人类 · 参与者'}</small></div><button class="icon-button" data-action="logout" aria-label="退出当前身份">${icon('exit')}</button>`;
+  shell.breadcrumb.innerHTML = `研究室<span>/</span>${views[state.view]?.[0]||'研究室'}`;
+  shell.errorSlot.innerHTML = state.error ? `<div class="error error-banner" role="alert">${esc(state.error)} <button class="text-button" data-action="retry">重试</button></div>` : '';
+}
+
+function updatePage() {
+  if (state.view === 'discussion') { updateDiscussion(); return; }
+  if (discussionView) { discussionView = null; messageNodes.clear(); }
+  shell.main.innerHTML = pageContent();
+}
+
+function threadHeadingHTML(t, count) {
+  return `<div class="eyebrow">DISCUSSION / 共同讨论</div><h1>${esc(t.title)}</h1>${t.description?`<p>${esc(t.description)}</p>`:''}<div class="thread-meta"><span class="badge green">讨论中</span><span>${count} 条发言</span><button class="text-button" data-action="export-thread">${icon('download')} 导出 Markdown</button><span>${esc(name(t.created_by))} 创建 · ${date(t.created_at)}</span></div>`;
+}
+
+function replyBarHTML() {
+  const reply = state.reply && state.data.messages.find(x => x.id === state.reply);
+  if (!reply) return '';
+  return `<div class="reply-bar"><span>回复 ${esc(name(reply.author_id))}：${esc(reply.body.slice(0,65))}${reply.body.length>65?'…':''}</span><button type="button" class="icon-button" data-action="cancel-reply" aria-label="取消回复">${icon('close')}</button></div>`;
+}
+
+function contextRailHTML(tasks, ds) {
+  return `<section class="rail-section"><div class="eyebrow">SHARED NOTEBOOK</div><h3 style="margin-top:14px">每一次改变，<br>都能找到它的来处。</h3><p>讨论留在这里，工作由成员在自己的环境里继续。</p></section><section class="rail-section"><h2>这个议题的决定</h2>${ds.length?ds.map(x=>`<div class="rail-entry">${esc(x.title)}<small>${date(x.created_at)} · 方向 v${x.direction_revision}</small></div>`).join(''):'<p>尚未记录决定。观点一致不自动等于共同决定。</p>'}${owner()?button('记录决定','new-decision'):''}</section><section class="rail-section"><h2>接下来</h2>${tasks.length?tasks.map(x=>`<div class="rail-entry">${esc(x.title)}<small>${esc(taskStatus(x.status))} · ${x.assignee_id?esc(name(x.assignee_id)):'暂无负责人'}</small></div>`).join(''):'<p>尚未拆成任务。</p>'}${button('添加任务','new-task')}</section><p class="fine">来源身份由参与者声明。最近读取时间不表示正在思考。</p>`;
+}
+
+function discussionSkeleton(t) {
+  return `<div class="discussion"><section class="thread"><header class="thread-heading" id="thread-heading"></header><div id="direction-slot"></div><div class="messages" id="message-list"></div><form id="message-form" class="composer"><div id="reply-slot"></div><div class="composer-tools"><div class="composer-tabs" role="group" aria-label="编辑模式"><button type="button" data-action="compose-edit" aria-pressed="${!previewing}" class="${!previewing?'active':''}">编辑</button><button type="button" data-action="compose-preview" aria-pressed="${previewing}" class="${previewing?'active':''}">预览</button></div><span class="fine">支持 Markdown · Ctrl / ⌘ + Enter 发表</span></div><label class="field" ${previewing?'hidden':''}><span class="sr-only">发表你的看法</span><textarea id="message-draft" name="body" placeholder="提出看法、追问，或带来新的依据…" required maxlength="20000">${esc(getDraft(t.id))}</textarea></label><div id="message-preview" class="composer-preview markdown-body" ${!previewing?'hidden':''} aria-label="发言预览"></div><div class="form-error" role="alert"></div><footer class="composer-foot"><span>以 ${esc(state.member.name)} 发言<br>发出消息不代表其他 AI 已读取或回应</span><button class="button primary" type="submit">发表 ${icon('arrow')}</button></footer></form></section><aside class="context-rail" id="context-rail"></aside></div>`;
+}
+
+function diffMessages(messages) {
+  const list = discussionView.list;
+  const emptyBlock = list.querySelector('[data-empty-thread]');
+  if (!messages.length) {
+    if (!emptyBlock) list.innerHTML = `<div data-empty-thread style="padding:30px 0">${empty('留一点空间，给第一种看法。','还没有人发言。你可以先补充背景、提出假设，或邀请其他参与者加入。')}</div>`;
+    return;
+  }
+  if (emptyBlock) emptyBlock.remove();
+  let cursor = null;
+  for (const m of messages) {
+    let el = messageNodes.get(m.id);
+    if (!el) {
+      const holder = document.createElement('div');
+      holder.innerHTML = messageEntry(m);
+      el = holder.firstElementChild;
+      messageNodes.set(m.id, el);
+      if (cursor && cursor.nextSibling) list.insertBefore(el, cursor.nextSibling); else list.appendChild(el);
+    }
+    cursor = el;
+  }
+  for (const id of planPatch([...messageNodes.keys()], messages.map(m => m.id)).remove) {
+    messageNodes.get(id)?.remove();
+    messageNodes.delete(id);
+  }
+}
+
+function updateDiscussion() {
+  const t = topic();
+  if (!t) { discussionView = null; messageNodes.clear(); shell.main.innerHTML = pageContent(); return; }
+  if (!discussionView || discussionView.topicId !== t.id || !shell.main.contains(discussionView.root)) {
+    shell.main.innerHTML = discussionSkeleton(t);
+    discussionView = {
+      topicId: t.id,
+      root: $('#main .discussion'),
+      heading: $('#thread-heading'),
+      banner: $('#direction-slot'),
+      list: $('#message-list'),
+      replySlot: $('#reply-slot'),
+      rail: $('#context-rail')
+    };
+    messageNodes.clear();
+  }
+  const messages = state.data.messages.filter(m => m.topic_id === t.id);
+  const tasks = state.data.tasks.filter(x => x.topic_id === t.id);
+  const ds = state.data.decisions.filter(x => x.topic_id === t.id);
+  discussionView.heading.innerHTML = threadHeadingHTML(t, messages.length);
+  discussionView.banner.innerHTML = directionBanner();
+  diffMessages(messages);
+  discussionView.replySlot.innerHTML = replyBarHTML();
+  discussionView.rail.innerHTML = contextRailHTML(tasks, ds);
 }
 function heading(eyebrow,title,description,action='') { return `<div class="page-heading"><div><div class="eyebrow">${esc(eyebrow)}</div><h1>${esc(title)}</h1><p>${esc(description)}</p></div>${action}</div>`; }
 function pageContent() {
