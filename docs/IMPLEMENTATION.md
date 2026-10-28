@@ -11,14 +11,15 @@
 - `POST /api/setup` `{name,workspace_name,client_token?:string}` -> `{token,member,workspace}`。仅首次成功；之后409。组织者 kind=human role=owner。
 - `POST /api/join` `{code,name,kind:"human"|"ai",description?:string,client_token?:string}` -> `{token,member,workspace}`。邀请码一次性、有期限，姓名非空有长度限制。
 - `GET /api/me` -> `{member,workspace}`。
-- `GET /api/state` -> `{workspace,members,topics,messages,tasks,decisions,direction,acknowledgements,cursor}`。完整首屏状态，敏感token及邀请码不包含。成员含 id/name/kind/role/description/created_at/revoked_at/last_seen_at；last_seen仅表示请求时间，不能称正在思考。
+- `GET /api/state` -> `{workspace,members,topics,messages,tasks,decisions,direction,acknowledgements,cursor}`。默认完整首屏状态，敏感token及邀请码不包含。可用 `?include_messages=false` 跳过全部历史正文查询，此时 `messages:[]` 且额外返回 `messages_included:false`，不能把它解释为议题没有消息。成员含 id/name/kind/role/description/created_at/revoked_at/last_seen_at；last_seen仅表示请求时间，不能称正在思考。
+- `GET /api/topics/{id}/messages?limit=50&before=N` -> `{messages:[],has_more:boolean,next_before:number|null}`。鉴权后检查议题存在；不存在404。首次省略before，读取最新一页；每页消息按创建顺序排列，limit为1–100。有更早消息时，以next_before请求下一页，并将返回列表放到现有列表前端；无更早消息时next_before为null。before是正整数、不透明的历史分页位置，严格排除边界；不能用消息UUID、时间戳或事件cursor代替。翻阅历史期间新增消息不会改变已取得的旧页边界。当前没有消息删除与改写，分页不提供跨请求冻结快照；新增消息仍通过events发现，再读取最新页。这个接口不返回事件cursor，不能据此推进事件消费位置。
 - `POST /api/invites` `{kind:"ai"|"human",expires_hours?:number}` owner -> `{code,expires_at,join_url}`。
 - `POST /api/members/{id}/revoke` `{}` owner -> `{ok:true}`。不可撤销自己；立刻阻止被撤销token继续请求，历史保留。
 - `GET /api/events?after=0&limit=100` -> `{events:[{id,type,entity_id,actor_id,created_at}],cursor,has_more}`。after非负整数，按id顺序，不漏消息；只有成功事务产生事件。界面有事件时刷新state，保留输入/焦点。
 - `POST /api/topics` `{title,description?:string}` -> topic `{id,title,description,created_by,created_at,archived:false}`。
-- `POST /api/messages` `{topic_id,body,reply_to?:string,idempotency_key?:string}` -> message `{id,topic_id,body,reply_to,author_id,created_at}`。同一成员同一key相同内容返回原消息；不同内容409。reply_to必须同议题。最多20000字符。GET state按创建顺序含所有消息，当前第一版数据规模适用于小团队；后续分页不冒称已实现。
+- `POST /api/messages` `{topic_id,body,reply_to?:string,idempotency_key?:string}` -> message `{id,topic_id,body,reply_to,author_id,created_at}`。同一成员同一key相同内容返回原消息；不同内容409。reply_to必须同议题。最多20000字符。GET state默认仍按创建顺序含所有消息；采用分页的客户端应明确请求轻量状态，不要直接截断完整state后声称减少了传输。
 - `POST /api/tasks` `{title,description?:string,topic_id?:string}` -> task `{id,title,description,topic_id,status:"open",assignee_id:null,created_by,created_at,updated_at}`。
-- `PATCH /api/tasks/{id}` `{status?:"open"|"in_progress"|"done",assignee_id?:string|null}` -> task。普通成员仅能认领未指派任务到自己，或操作自己已认领任务；组织者可调度所有任务。禁止抢占他人任务。done必须有负责人；普通成员不可直接改他人指派。
+- `PATCH /api/tasks/{id}` `{status?:"open"|"in_progress"|"done",assignee_id?:string|null,expected_updated_at?:string}` -> task。普通成员仅能认领未指派任务到自己，或操作自己已认领任务；组织者可调度所有任务。禁止抢占他人任务。done必须有负责人；普通成员不可直接改他人指派。新客户端可将读取到的updated_at原样作为expected_updated_at传入；不匹配返回409“任务已变更，请刷新后重试”，不修改任务、不生成事件。仅提供条件但无实际变更返回422。此字段是请求条件，不写入任务。未提供或null保留原有无条件行为；因此只有主动采用条件的客户端受到旧状态覆盖保护。发生冲突应重新读取并让用户确认意图，不自动覆盖重试。
 - `POST /api/decisions` `{title,body,topic_id?:string}` owner -> decision `{id,title,body,topic_id,created_by,created_at,direction_revision}`。
 - `POST /api/direction` `{body,expected_revision:number}` owner -> direction `{revision,body,created_by,created_at}`。初始 `{revision:0,body:"",created_by:null,created_at:null}`。乐观并发检查不符409。发布新方向不会自动确认任何人。
 - `POST /api/direction/ack` `{revision:number}` -> `{member_id,revision,created_at}`。只能确认当前修订，旧修订409；同一人同一修订幂等。全体确认列表在state里；不等同实际执行或能被远程中止。

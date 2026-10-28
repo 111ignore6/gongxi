@@ -79,6 +79,7 @@ class Task(Topic):
 class TaskPatch(Input):
     status: Literal["open", "in_progress", "done"] | None = None
     assignee_id: str | None = Field(default=None, min_length=1, max_length=80)
+    expected_updated_at: str | None = Field(default=None, min_length=1, max_length=80)
 
 
 class Decision(Input):
@@ -118,6 +119,7 @@ def create_app(data_dir=None):
                 CREATE TABLE IF NOT EXISTS invites(code_hash TEXT PRIMARY KEY,kind TEXT NOT NULL,expires_at TEXT NOT NULL,used_at TEXT);
                 CREATE TABLE IF NOT EXISTS entities(id TEXT PRIMARY KEY,kind TEXT NOT NULL,data TEXT NOT NULL);
                 CREATE INDEX IF NOT EXISTS entities_kind ON entities(kind);
+                CREATE INDEX IF NOT EXISTS entities_topic ON entities(kind,json_extract(data,'$.topic_id'));
                 CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY AUTOINCREMENT,type TEXT NOT NULL,entity_id TEXT NOT NULL,actor_id TEXT NOT NULL,created_at TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS idempotency(member_id TEXT NOT NULL,key TEXT NOT NULL,body TEXT NOT NULL,message_id TEXT NOT NULL,PRIMARY KEY(member_id,key));
                 CREATE TABLE IF NOT EXISTS directions(revision INTEGER PRIMARY KEY,data TEXT NOT NULL);
@@ -264,10 +266,15 @@ def create_app(data_dir=None):
         row = db.execute("SELECT data FROM directions ORDER BY revision DESC LIMIT 1").fetchone()
         return json.loads(row[0]) if row else {"revision": 0, "body": "", "created_by": None, "created_at": None}
 
-    def state(db):
+    def state(db, include_messages=True):
         result = {"workspace": workspace(db), "members": [json.loads(r[0]) for r in db.execute("SELECT data FROM members ORDER BY rowid")]}
         for singular, plural in (("topic", "topics"), ("message", "messages"), ("task", "tasks"), ("decision", "decisions")):
+            if singular == "message" and not include_messages:
+                result[plural] = []
+                continue
             result[plural] = [json.loads(r[0]) for r in db.execute("SELECT data FROM entities WHERE kind=? ORDER BY rowid", (singular,))]
+        if not include_messages:
+            result["messages_included"] = False
         result["direction"] = direction(db)
         result["acknowledgements"] = [json.loads(r[0]) for r in db.execute("SELECT data FROM acknowledgements ORDER BY rowid")]
         result["cursor"] = db.execute("SELECT COALESCE(MAX(id),0) FROM events").fetchone()[0]
@@ -344,8 +351,25 @@ def create_app(data_dir=None):
         return {"member": actor, "workspace": workspace(db)}
 
     @app.get("/api/state")
-    def read_state(actor=Depends(member), db=Depends(database)):
-        return state(db)
+    def read_state(include_messages: bool = True, actor=Depends(member), db=Depends(database)):
+        return state(db, include_messages=include_messages)
+
+    @app.get("/api/topics/{ident}/messages")
+    def topic_messages(ident: str, before: int | None = Query(None, ge=1, le=9223372036854775807),
+                       limit: int = Query(50, ge=1, le=100), actor=Depends(member), db=Depends(database)):
+        get(db, "topic", ident)
+        rows = list(db.execute(
+            "SELECT rowid,data FROM entities WHERE kind='message' AND json_extract(data,'$.topic_id')=? "
+            "AND (? IS NULL OR rowid<?) ORDER BY rowid DESC LIMIT ?",
+            (ident, before, before, limit + 1),
+        ))
+        more = len(rows) > limit
+        rows = rows[:limit]
+        return {
+            "messages": [json.loads(row["data"]) for row in reversed(rows)],
+            "has_more": more,
+            "next_before": rows[-1]["rowid"] if more else None,
+        }
 
     @app.post("/api/invites")
     def invite(body: Invite, actor=Depends(owner), db=Depends(database)):
@@ -369,7 +393,7 @@ def create_app(data_dir=None):
         return {"ok": True}
 
     @app.get("/api/events")
-    def events(after: int = Query(0, ge=0), limit: int = Query(100, ge=1, le=500), actor=Depends(member), db=Depends(database)):
+    def events(after: int = Query(0, ge=0, le=9223372036854775807), limit: int = Query(100, ge=1, le=500), actor=Depends(member), db=Depends(database)):
         rows = [dict(r) for r in db.execute("SELECT * FROM events WHERE id>? ORDER BY id LIMIT ?", (after, limit + 1))]
         more = len(rows) > limit
         rows = rows[:limit]
@@ -410,7 +434,7 @@ def create_app(data_dir=None):
     @app.patch("/api/tasks/{ident}")
     def patch_task(ident: str, body: TaskPatch, actor=Depends(member), db=Depends(database)):
         value = get(db, "task", ident)
-        changes = body.model_dump(exclude_unset=True)
+        changes = body.model_dump(exclude_unset=True, exclude={"expected_updated_at"})
         if not changes or ("status" in changes and changes["status"] is None):
             fail(422, "请提供有效的任务变更")
         assigned = changes.get("assignee_id", value["assignee_id"])
@@ -420,6 +444,8 @@ def create_app(data_dir=None):
             releasing = (value["assignee_id"] == actor["id"] and assigned is None and changes.get("status") == "open")
             if assigned != actor["id"] and not releasing:
                 fail(403, "普通成员只能认领到自己或更新自己的任务")
+        if body.expected_updated_at is not None and body.expected_updated_at != value["updated_at"]:
+            fail(409, "任务已变更，请刷新后重试")
         if assigned is not None:
             row = db.execute("SELECT data FROM members WHERE id=?", (assigned,)).fetchone()
             if not row or json.loads(row[0])["revoked_at"]:
