@@ -164,7 +164,7 @@ function updateUnread(d) {
 function resetRegions(){ shell = null; discussionView = null; messageNodes.clear(); }
 
 function shellHTML() {
-  return `<div class="mobile-scrim ${state.mobile ? 'open' : ''}" data-action="close-menu"></div><div class="layout"><aside class="sidebar ${state.mobile ? 'open' : ''}" aria-label="研究室导航">${brand()}<div class="space-name" id="space-name"></div><nav class="main-nav" aria-label="主导航" id="main-nav"></nav><div class="sidebar-label">最近的议题</div><div id="topic-list"></div><button class="text-button" style="padding:15px 12px" data-action="new-topic">${icon('plus')} 新建议题</button><div class="sidebar-bottom"><button class="text-button" style="padding:10px" data-action="save-credential">保存我的凭证</button><div class="connection"><span class="signal"></span><span id="connection-label"></span></div><div class="sidebar-user" id="sidebar-user"></div></div></aside><section class="workspace"><header class="workspace-header"><button class="icon-button mobile-menu" data-action="menu" aria-label="打开导航" aria-expanded="${state.mobile}">${icon('menu')}</button><div class="breadcrumb" id="breadcrumb"></div><div class="header-actions">${themePicker()}<button class="icon-button" data-view="search" aria-label="搜索工作区">${icon('search')}</button>${owner()?button('邀请参与者','invite'):''}</div></header><div id="error-slot"></div><main id="main" tabindex="-1"></main></section></div>`;
+  return `<div class="mobile-scrim ${state.mobile ? 'open' : ''}" data-action="close-menu"></div><div class="layout"><aside class="sidebar ${state.mobile ? 'open' : ''}" aria-label="研究室导航">${brand()}<div class="space-name" id="space-name"></div><nav class="main-nav" aria-label="主导航" id="main-nav"></nav><div class="sidebar-label">最近的议题</div><div id="topic-list"></div><button class="text-button" style="padding:15px 12px" data-action="new-topic">${icon('plus')} 新建议题</button><div class="sidebar-bottom"><button class="text-button" style="padding:10px" data-action="save-credential">保存我的凭证</button><div class="connection"><span class="signal"></span><span id="connection-label"></span></div><div class="sidebar-user" id="sidebar-user"></div></div></aside><section class="workspace"><header class="workspace-header"><button class="icon-button mobile-menu" data-action="menu" aria-label="打开导航" aria-expanded="${state.mobile}">${icon('menu')}</button><div class="breadcrumb" id="breadcrumb"></div><div class="header-actions">${themePicker()}<button class="icon-button" data-view="search" aria-label="搜索工作区">${icon('search')}</button>${owner()?button('邀请参与者','invite'):''}</div></header><div id="error-slot"></div><div id="action-error"></div><main id="main" tabindex="-1"></main></section></div>`;
 }
 
 function mountShell() {
@@ -217,6 +217,7 @@ function updateShell() {
   setRegion(shell.user, `${avatar(state.member)}<div><strong>${esc(state.member.name)}</strong><small>${owner()?'人类 · 组织者':state.member.kind==='ai'?'AI · 参与者':'人类 · 参与者'}</small></div><button class="icon-button" data-action="logout" aria-label="退出当前身份">${icon('exit')}</button>`, [state.member.name, state.member.kind, state.member.role].join('|'));
   setRegion(shell.breadcrumb, `研究室<span>/</span>${views[state.view]?.[0]||'研究室'}`, state.view);
   setRegion(shell.errorSlot, state.error ? `<div class="error error-banner" role="alert">${esc(state.error)} <button class="text-button" data-action="retry">重试</button></div>` : '', String(state.error));
+  updateActionError();
   shell.connection.innerHTML = state.offline ? '连接暂时中断 · 自动重试中' : `上次同步 ${date(state.lastSync)}<br>每 5 秒检查更新，不代表 AI 在线`;
   shell.signal.classList.toggle('offline', Boolean(state.offline));
 
@@ -682,6 +683,8 @@ document.addEventListener('click',async event=>{
       case 'ack':el.disabled=true;await post('/direction/ack',{revision:state.data.direction.revision});await refresh(true);toast('已记录你的确认；这不代表其他成员也已确认。');break;
       case 'cancel-reply':{const snap=captureUI();state.reply=null;render();restoreUI(snap);break;}
       case 'toggle-direction':directionOpen=!directionOpen;render(true);break;
+      case 'retry-action':{const retry=state.actionError&&state.actionError.retry;if(retry)retry();break;}
+      case 'dismiss-action':{state.actionError=null;updateActionError();break;}
       case 'all-topics':state.topic='';state.view='discussion';navigate('discussion');break;
       case 'copy-invite':await copy($('#invitation-text').value);break;
       case 'copy-skill-invite':await copy(`读取 ${location.origin}/skill.md 后加入空间`);break;
@@ -692,21 +695,51 @@ document.addEventListener('click',async event=>{
       case 'export':{el.disabled=true;const data=await api('/export');const url=URL.createObjectURL(new Blob([JSON.stringify(data,null,2)],{type:'application/json;charset=utf-8'}));const a=document.createElement('a');a.href=url;a.download=`共席-工作区-${new Date().toISOString().slice(0,10)}.json`;a.click();setTimeout(()=>URL.revokeObjectURL(url),2000);el.disabled=false;toast('工作区已导出。');break;}
       case 'retry':if(state.data)await refresh(true);else await start();break;
     }
-  } catch(error){toast(error.message);if(el.isConnected)el.disabled=false;}
+  } catch(error){actionFailed(error.message);toast(error.message);if(el.isConnected)el.disabled=false;}
 });
-document.addEventListener('change',async event=>{
-  const el=event.target;
-  if(el.matches('[data-theme-picker]')){window.GongxiTheme?.setPreference(el.value);return;}
-  if(el.id==='credential-file'){
-    const file=el.files?.[0];
-    if(file)await importCredentialFile(file);
-    el.value='';
-    return;
-  }
-  if(!el.dataset.taskStatus&&!el.dataset.taskAssignee)return;
-  el.disabled=true;
-  try{await patch(`/tasks/${el.dataset.taskStatus||el.dataset.taskAssignee}`,el.dataset.taskStatus?{status:el.value}:{assignee_id:el.value||null});await refresh(true);toast('任务已更新。');}
-  catch(error){toast(error.message);await refresh(true).catch(()=>{});}finally{el.disabled=false;}
+function updateActionError() {
+  const slot = $('#action-error');
+  if (!slot) return;
+  const err = state.actionError;
+  slot.innerHTML = err ? `<div class="error error-banner" role="alert">${esc(err.message)}${err.retry?' <button class="text-button" data-action="retry-action">重试</button>':''} <button class="text-button" data-action="dismiss-action">关闭</button></div>` : '';
+}
+
+function actionFailed(message, retry) {
+  state.actionError = {message, retry: retry || null};
+  updateActionError();
+  if (!retry) toast(message);
+}
+
+function actionSucceeded() {
+  if (state.actionError) { state.actionError = null; updateActionError(); }
+}
+
+function submitTaskChange(el) {
+  const id = el.dataset.taskStatus || el.dataset.taskAssignee;
+  const payload = el.dataset.taskStatus ? {status: el.value} : {assignee_id: el.value || null};
+  const run = async () => {
+    el.disabled = true;
+    try {
+      await patch(`/tasks/${id}`, payload);
+      actionSucceeded();
+      await refresh(true);
+      toast('任务已更新。');
+    } catch (error) {
+      actionFailed(error.message, run);
+      await refresh(true).catch(() => {});
+    } finally {
+      el.disabled = false;
+    }
+  };
+  run();
+}
+
+document.addEventListener('change', async event => {
+  const el = event.target;
+  if (el.matches('[data-theme-picker]')) { window.GongxiTheme?.setPreference(el.value); return; }
+  if (el.id === 'credential-file') { const file = el.files?.[0]; if (file) await importCredentialFile(file); el.value = ''; return; }
+  if (!el.dataset.taskStatus && !el.dataset.taskAssignee) return;
+  submitTaskChange(el);
 });
 document.addEventListener('input',event=>{if(event.target.id==='message-draft'){saveDraft(state.topic,event.target.value);updatePreview();const form=$('#message-form');if(form)delete form.dataset.requestKey;}if(event.target.id==='credential-name'||event.target.id==='credential-description')saveCredentialMeta();});
 document.addEventListener('invalid',event=>{if(event.target.id==='message-draft')setComposerMode(false);},true);
