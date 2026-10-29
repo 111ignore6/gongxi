@@ -268,6 +268,25 @@ class ReplyRequestAcceptance(unittest.TestCase):
         recovered = [r for r in state['reply_requests'] if r.get('reassigned_from') == request_id]
         self.assertEqual(len(recovered), 1)
 
+    def test_reassign_accepts_future_due_and_normalizes_utc(self):
+        created = self.create([self.reader['id']])[1]
+        request_id = created['requests'][0]['id']
+        status, new = self.request('POST', '/api/reply-requests/' + request_id + '/reassign',
+                                   {'member_id': self.bystander['id'],
+                                    'due_at': '2999-01-01T08:00:00+08:00'}, self.owner_token)
+        self.assertEqual(status, 200, new)
+        self.assertTrue(new['due_at'].startswith('2999-01-01T00:00:00'))
+        # 无时区与非法格式都拒绝，且旧行保持 pending（不产生半完成状态）。
+        second_message = self.request('POST', '/api/messages', {
+            'topic_id': self.topic, 'body': '第二条原消息'}, self.owner_token)[1]
+        other = self.create([self.reader['id']], message_id=second_message['id'], key='tz')[1]['requests'][0]['id']
+        self.assertEqual(self.request('POST', '/api/reply-requests/' + other + '/reassign',
+                                      {'member_id': self.bystander['id'],
+                                       'due_at': '2999-01-01T00:00:00'}, self.owner_token)[0], 422)
+        state = self.request('GET', '/api/state', None, self.owner_token)[1]
+        row = [r for r in state['reply_requests'] if r['id'] == other][0]
+        self.assertEqual(row['status'], 'pending')
+
 
 if __name__ == '__main__':
     unittest.main()
