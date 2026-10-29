@@ -208,6 +208,7 @@ class ReplyRequestAcceptance(unittest.TestCase):
         self.assertEqual(status, 200, new)
         self.assertEqual(new['status'], 'pending')
         self.assertEqual(new['reassigned_from'], old)
+        self.assertIsNone(new['due_at'])
         state = self.request('GET', '/api/state', None, self.owner_token)[1]
         old_row = [r for r in state['reply_requests'] if r['id'] == old][0]
         self.assertEqual(old_row['status'], 'withdrawn')
@@ -234,6 +235,38 @@ class ReplyRequestAcceptance(unittest.TestCase):
             'topic_id': self.topic, 'body': '回应', 'reply_to': self.message['id']}, self.reader['token'])
         self.assertEqual(self.request('POST', '/api/reply-requests/' + old + '/reassign',
                                       {'member_id': self.bystander['id']}, self.owner_token)[0], 409)
+
+    def test_requester_can_reassign_and_unrelated_cannot(self):
+        message = self.request('POST', '/api/messages', {
+            'topic_id': self.topic, 'body': 'reader 发起请求'}, self.reader['token'])[1]
+        created = self.request('POST', '/api/reply-requests',
+                               {'message_id': message['id'], 'member_ids': [self.owner_id]},
+                               self.reader['token'], {'Idempotency-Key': 'rr1'})[1]
+        request_id = created['requests'][0]['id']
+        status, _ = self.request('POST', '/api/reply-requests/' + request_id + '/reassign',
+                                 {'member_id': self.bystander['id']}, self.bystander['token'])
+        self.assertEqual(status, 403)
+        status, new = self.request('POST', '/api/reply-requests/' + request_id + '/reassign',
+                                   {'member_id': self.bystander['id']}, self.reader['token'])
+        self.assertEqual(status, 200, new)
+        self.assertEqual(new['reassigned_from'], request_id)
+
+    def test_reassign_deadline_and_retry_recovery(self):
+        created = self.create([self.reader['id']], due='2999-01-01T00:00:00+00:00')[1]
+        request_id = created['requests'][0]['id']
+        self.assertEqual(self.request('POST', '/api/reply-requests/' + request_id + '/reassign',
+                                      {'member_id': self.bystander['id'],
+                                       'due_at': '2000-01-01T00:00:00+00:00'}, self.owner_token)[0], 422)
+        status, new = self.request('POST', '/api/reply-requests/' + request_id + '/reassign',
+                                   {'member_id': self.bystander['id']}, self.owner_token)
+        self.assertEqual(status, 200, new)
+        self.assertIsNone(new['due_at'])
+        retry_status, _ = self.request('POST', '/api/reply-requests/' + request_id + '/reassign',
+                                       {'member_id': self.reader['id']}, self.owner_token)
+        self.assertEqual(retry_status, 409)
+        state = self.request('GET', '/api/state', None, self.owner_token)[1]
+        recovered = [r for r in state['reply_requests'] if r.get('reassigned_from') == request_id]
+        self.assertEqual(len(recovered), 1)
 
 
 if __name__ == '__main__':

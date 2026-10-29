@@ -1,6 +1,6 @@
-# 提醒与回应：设计草案（v0.1）
+# 提醒与回应：设计（v0.3，已评审）
 
-状态：待评审。本文只定义产品语义与验收，不含实现。v0.1 吸收 Codex 对“已回应判定、状态机、期限、撤销、汇总与事件隐私”的意见。
+状态：v0.3 已评审通过，作为实现与验收依据。本文只定义产品语义与验收，不含实现。v0.1 吸收 Codex 对“已回应判定、状态机、期限、撤销、汇总与事件隐私”的意见。
 
 ## 1. 为什么需要三种状态
 
@@ -74,7 +74,7 @@
 - 不把普通消息默认变成催办。
 - v1 不支持重新打开已结束的请求。
 
-## 7. 实现契约（v0.2 追加，依据 Codex 2026-10-29 提议）
+## 7. 实现契约（v0.2 追加，v0.3 定稿）
 
 ### 7.1 原子化回应
 
@@ -115,6 +115,8 @@
 | 撤销原因 | 可见 | 可见 | 不可见 | 不可见 |
 
 ### 7.6 接口草案
+
+- POST /api/reply-requests/{id}/reassign {member_id, due_at?}：仅发起人或组织者；默认清空期限，显式传的 due_at 必须为未来（过去返回 422）；旧行 withdrawn（reason=reassigned），新行 pending 且 reassigned_from=旧 id；旧行已终态时重试返回 409，客户端可从 state 中按 reassigned_from 恢复成功结果。
 
 - `POST /api/reply-requests` `{message_id, member_ids[], due_at?}` → 200（首次与幂等重试同码），逐人生成行；校验 7.3。
 - `PATCH /api/reply-requests/{id}` `{status:"withdrawn"}` 或 `{due_at}`：仅发起人、仅 pending；组织者不代理（如需代理另立规格）。

@@ -124,6 +124,7 @@ class ReplyRequestPatch(Input):
 
 class ReplyRequestReassign(Input):
     member_id: str = Field(min_length=1, max_length=80)
+    due_at: str | None = None
 
 
 def create_app(data_dir=None):
@@ -725,6 +726,17 @@ def create_app(data_dir=None):
                                (item["message_id"], body.member_id)).fetchone()
         if duplicate:
             fail(409, "该成员已有未结束的回应请求")
+        due = body.due_at
+        if due:
+            try:
+                parsed = datetime.fromisoformat(due.replace("Z", "+00:00"))
+            except ValueError:
+                fail(422, "due_at 必须是 ISO 时间")
+            if parsed.tzinfo is None:
+                fail(422, "due_at 必须带时区")
+            if parsed <= datetime.now(timezone.utc):
+                fail(422, "due_at 必须是未来时间")
+            due = parsed.astimezone(timezone.utc).isoformat()
         timestamp = now()
         db.execute("UPDATE reply_requests SET status='withdrawn',withdrawn_at=?,withdrawal_reason='reassigned' WHERE id=?",
                    (timestamp, ident))
@@ -732,7 +744,7 @@ def create_app(data_dir=None):
         new_id = uid()
         db.execute("INSERT INTO reply_requests(id,message_id,member_id,requested_by,due_at,status,reassigned_from,created_at) "
                    "VALUES(?,?,?,?,?,'pending',?,?)",
-                   (new_id, item["message_id"], body.member_id, item["requested_by"], item["due_at"], ident, timestamp))
+                   (new_id, item["message_id"], body.member_id, item["requested_by"], due, ident, timestamp))
         event(db, "reply_request.created", new_id, actor["id"])
         return dict(db.execute("SELECT * FROM reply_requests WHERE id=?", (new_id,)).fetchone())
 
