@@ -12,7 +12,7 @@ import sqlite3
 from typing import Literal
 from uuid import uuid4
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
@@ -111,6 +111,17 @@ class Empty(Input):
     pass
 
 
+class ReplyRequestCreate(Input):
+    message_id: str = Field(min_length=1, max_length=80)
+    member_ids: list[str] = Field(min_length=1, max_length=20)
+    due_at: str | None = Field(default=None, min_length=1, max_length=40)
+
+
+class ReplyRequestPatch(Input):
+    status: Literal["withdrawn"] | None = None
+    due_at: str | None = None
+
+
 def create_app(data_dir=None):
     location = Path(data_dir or os.environ.get("CS_DATA_DIR", ROOT / "data")).expanduser().resolve()
     dbfile = location / "gongxi.sqlite3"
@@ -144,6 +155,18 @@ def create_app(data_dir=None):
                     status TEXT NOT NULL CHECK(status IN ('pending','handled','no_action')),
                     updated_at TEXT NOT NULL, PRIMARY KEY(message_id,member_id));
                 CREATE INDEX IF NOT EXISTS message_action_states_member ON message_action_states(member_id,status);
+                CREATE TABLE IF NOT EXISTS reply_requests(
+                    id TEXT PRIMARY KEY, message_id TEXT NOT NULL, member_id TEXT NOT NULL,
+                    requested_by TEXT NOT NULL, due_at TEXT,
+                    status TEXT NOT NULL CHECK(status IN ('pending','responded','withdrawn')),
+                    response_message_id TEXT, responded_at TEXT,
+                    withdrawn_at TEXT, withdrawal_reason TEXT, reassigned_from TEXT, created_at TEXT NOT NULL);
+                CREATE INDEX IF NOT EXISTS reply_requests_target ON reply_requests(member_id,status);
+                CREATE INDEX IF NOT EXISTS reply_requests_message ON reply_requests(message_id);
+                CREATE TABLE IF NOT EXISTS reply_request_idempotency(
+                    requested_by TEXT NOT NULL, key TEXT NOT NULL, message_id TEXT NOT NULL,
+                    payload TEXT NOT NULL, result_ids TEXT NOT NULL,
+                    PRIMARY KEY(requested_by,key));
             """)
             db.execute("INSERT OR IGNORE INTO app_settings(key,value) SELECT 'read_tracking_start_event_id', CAST(COALESCE(MAX(id),0) AS TEXT) FROM events")
             db.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('read_tracking_started_at',?)", (now(),))
@@ -298,6 +321,29 @@ def create_app(data_dir=None):
             message["event_id"] = event_ids.get(message["id"])
         return messages
 
+    def visible_reply_requests(db, actor):
+        rows = [dict(r) for r in db.execute(
+            "SELECT id,message_id,member_id,requested_by,due_at,status,response_message_id,"
+            "responded_at,withdrawn_at,withdrawal_reason,reassigned_from,created_at "
+            "FROM reply_requests ORDER BY created_at,id")]
+        out = []
+        for item in rows:
+            is_owner = actor["role"] == "owner"
+            is_target = item["member_id"] == actor["id"]
+            is_requester = item["requested_by"] == actor["id"]
+            if not (is_owner or is_target or is_requester):
+                continue
+            if not is_owner and not is_target:
+                item.pop("responded_at", None)
+            if item["status"] != "withdrawn":
+                item.pop("withdrawn_at", None)
+                item.pop("withdrawal_reason", None)
+            if not is_owner and not is_requester:
+                item.pop("withdrawal_reason", None)
+                item.pop("withdrawn_at", None)
+            out.append(item)
+        return out
+
     def state(db, actor, include_messages=True):
         result = {"workspace": workspace(db), "members": [json.loads(r[0]) for r in db.execute("SELECT data FROM members ORDER BY rowid")]}
         for singular, plural in (("topic", "topics"), ("message", "messages"), ("task", "tasks"), ("decision", "decisions")):
@@ -349,6 +395,7 @@ def create_app(data_dir=None):
                 item.pop("updated_at")
             visible_actions.append(item)
         result["action_states"] = visible_actions
+        result["reply_requests"] = visible_reply_requests(db, actor)
         result["direction"] = direction(db)
         result["acknowledgements"] = [json.loads(r[0]) for r in db.execute("SELECT data FROM acknowledgements ORDER BY rowid")]
         result["cursor"] = db.execute("SELECT COALESCE(MAX(id),0) FROM events").fetchone()[0]
@@ -519,6 +566,17 @@ def create_app(data_dir=None):
                     message_ids,
                 )
             }
+        request_ids = list(dict.fromkeys(row["entity_id"] for row in rows if row["type"].startswith("reply_request.")))
+        requests = {}
+        if request_ids:
+            placeholders = ",".join("?" for _ in request_ids)
+            requests = {
+                row["id"]: dict(row)
+                for row in db.execute(
+                    f"SELECT id,message_id,member_id,requested_by,status FROM reply_requests WHERE id IN ({placeholders})",
+                    request_ids,
+                )
+            }
         visible_rows = []
         for row in rows:
             if row["type"] == "member.read_state_updated" and actor["role"] != "owner" and row["actor_id"] != actor["id"]:
@@ -531,12 +589,108 @@ def create_app(data_dir=None):
                     continue
                 if is_message_author and not is_state_owner:
                     row.pop("created_at", None)
+            if row["type"].startswith("reply_request."):
+                request_row = requests.get(row["entity_id"])
+                if not request_row:
+                    continue
+                is_owner = actor["role"] == "owner"
+                is_target = request_row["member_id"] == actor["id"]
+                is_requester = request_row["requested_by"] == actor["id"]
+                if not (is_owner or is_target or is_requester):
+                    continue
+                if not is_owner and not is_target:
+                    row.pop("created_at", None)
             if row["type"] == "message.created":
                 message_value = messages.get(row["entity_id"], {})
                 row["event_id"] = row["id"]
                 row["action_for"] = message_value.get("action_for", [])
             visible_rows.append(row)
         return {"events": visible_rows, "cursor": cursor, "has_more": more}
+
+    @app.post("/api/reply-requests")
+    def create_reply_request(body: ReplyRequestCreate,
+                             idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+                             actor=Depends(member, scope="function"), db=Depends(database, scope="function")):
+        message_value = get(db, "message", body.message_id)
+        if message_value.get("author_id") != actor["id"]:
+            fail(403, "只有原消息作者可以请求回应")
+        key = (idempotency_key or "").strip()
+        if not key:
+            fail(422, "缺少 Idempotency-Key 请求头")
+        payload = json.dumps({"message_id": body.message_id, "member_ids": sorted(body.member_ids), "due_at": body.due_at}, sort_keys=True, ensure_ascii=False)
+        previous = db.execute("SELECT message_id,payload,result_ids FROM reply_request_idempotency WHERE requested_by=? AND key=?", (actor["id"], key)).fetchone()
+        if previous:
+            if previous["message_id"] != body.message_id or previous["payload"] != payload:
+                fail(409, "相同幂等键对应不同内容")
+            ids = json.loads(previous["result_ids"])
+            if not ids:
+                return {"requests": []}
+            placeholders = ",".join("?" for _ in ids)
+            rows = [dict(r) for r in db.execute("SELECT * FROM reply_requests WHERE id IN (" + placeholders + ")", ids)]
+            return {"requests": rows}
+        targets = list(dict.fromkeys(body.member_ids))
+        if actor["id"] in targets:
+            fail(422, "不能请求自己回应")
+        due = body.due_at
+        if due:
+            try:
+                parsed = datetime.fromisoformat(due.replace("Z", "+00:00"))
+            except ValueError:
+                fail(422, "due_at 必须是 ISO 时间")
+            if parsed.tzinfo is None:
+                fail(422, "due_at 必须带时区")
+            if parsed <= datetime.now(timezone.utc):
+                fail(422, "due_at 必须是未来时间")
+            due = parsed.astimezone(timezone.utc).isoformat()
+        timestamp = now()
+        ids = []
+        for target_id in targets:
+            member_row = db.execute("SELECT data FROM members WHERE id=?", (target_id,)).fetchone()
+            if not member_row:
+                fail(422, "回应对象必须是有效成员")
+            if json.loads(member_row["data"])["revoked_at"]:
+                fail(422, "回应对象不能是已撤销成员")
+            existing = db.execute("SELECT id FROM reply_requests WHERE message_id=? AND member_id=? AND status='pending'", (body.message_id, target_id)).fetchone()
+            if existing:
+                fail(409, "该成员已有未结束的回应请求")
+            ident = uid()
+            db.execute("INSERT INTO reply_requests(id,message_id,member_id,requested_by,due_at,status,created_at) VALUES(?,?,?,?,?,'pending',?)", (ident, body.message_id, target_id, actor["id"], due, timestamp))
+            event(db, "reply_request.created", ident, actor["id"])
+            ids.append(ident)
+        db.execute("INSERT INTO reply_request_idempotency VALUES(?,?,?,?,?)", (actor["id"], key, body.message_id, payload, json.dumps(ids)))
+        placeholders = ",".join("?" for _ in ids)
+        rows = [dict(r) for r in db.execute("SELECT * FROM reply_requests WHERE id IN (" + placeholders + ")", ids)]
+        return {"requests": rows}
+
+    @app.patch("/api/reply-requests/{ident}")
+    def patch_reply_request(ident: str, body: ReplyRequestPatch,
+                            actor=Depends(member, scope="function"), db=Depends(database, scope="function")):
+        row = db.execute("SELECT * FROM reply_requests WHERE id=?", (ident,)).fetchone()
+        if not row:
+            fail(404, "回应请求不存在")
+        item = dict(row)
+        if actor["role"] != "owner" and item["requested_by"] != actor["id"]:
+            fail(403, "只有发起人可以修改回应请求")
+        if item["status"] != "pending":
+            fail(409, "只有待回应的请求可以修改")
+        fields = body.model_fields_set
+        if "status" in fields and body.status == "withdrawn":
+            db.execute("UPDATE reply_requests SET status='withdrawn',withdrawn_at=?,withdrawal_reason='withdrawn' WHERE id=?", (now(), ident))
+            event(db, "reply_request.withdrawn", ident, actor["id"])
+        if "due_at" in fields:
+            due = body.due_at
+            if due:
+                try:
+                    parsed = datetime.fromisoformat(due.replace("Z", "+00:00"))
+                except ValueError:
+                    fail(422, "due_at 必须是 ISO 时间")
+                if parsed.tzinfo is None:
+                    fail(422, "due_at 必须带时区")
+                if parsed <= datetime.now(timezone.utc):
+                    fail(422, "due_at 必须是未来时间")
+                due = parsed.astimezone(timezone.utc).isoformat()
+            db.execute("UPDATE reply_requests SET due_at=? WHERE id=?", (due, ident))
+        return dict(db.execute("SELECT * FROM reply_requests WHERE id=?", (ident,)).fetchone())
 
     @app.post("/api/topics")
     def topic(body: Topic, actor=Depends(member, scope="function"), db=Depends(database, scope="function")):
@@ -582,6 +736,17 @@ def create_app(data_dir=None):
             db.execute("INSERT INTO idempotency VALUES(?,?,?,?)", (actor["id"], body.idempotency_key, canonical, value["id"]))
         event(db, "message.created", value["id"], actor["id"])
         value["event_id"] = db.execute("SELECT id FROM events WHERE type='message.created' AND entity_id=?", (value["id"],)).fetchone()[0]
+        if body.reply_to:
+            pending = db.execute(
+                "SELECT id FROM reply_requests WHERE message_id=? AND member_id=? AND status='pending'",
+                (body.reply_to, actor["id"]),
+            ).fetchone()
+            if pending:
+                db.execute(
+                    "UPDATE reply_requests SET status='responded',response_message_id=?,responded_at=? WHERE id=?",
+                    (value["id"], timestamp, pending[0]),
+                )
+                event(db, "reply_request.responded", pending[0], actor["id"])
         return value
 
     @app.patch("/api/messages/{ident}/action-state")
