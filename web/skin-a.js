@@ -22,10 +22,10 @@
     return true;
   }
   if (bind()) return;
-  // Wait for the shell to mount instead of polling forever (e.g. on the login page).
+  // Observe until the authenticated shell mounts; disconnect as soon as we bind.
+  // No timer: on the login page this only reacts to DOM mutations, it does not poll.
   const wait = new MutationObserver(() => {
     if (bind()) wait.disconnect();
   });
   wait.observe(document.documentElement, { childList: true, subtree: true });
-  setTimeout(() => wait.disconnect(), 30000);
 })();
