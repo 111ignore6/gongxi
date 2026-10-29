@@ -200,6 +200,41 @@ class ReplyRequestAcceptance(unittest.TestCase):
                                  {'status': 'withdrawn'}, self.owner_token)
         self.assertEqual(status, 403)
 
+    def test_reassign_audits_old_row_and_creates_new(self):
+        created = self.create([self.reader['id']])[1]
+        old = created['requests'][0]['id']
+        status, new = self.request('POST', '/api/reply-requests/' + old + '/reassign',
+                                   {'member_id': self.bystander['id']}, self.owner_token)
+        self.assertEqual(status, 200, new)
+        self.assertEqual(new['status'], 'pending')
+        self.assertEqual(new['reassigned_from'], old)
+        state = self.request('GET', '/api/state', None, self.owner_token)[1]
+        old_row = [r for r in state['reply_requests'] if r['id'] == old][0]
+        self.assertEqual(old_row['status'], 'withdrawn')
+        self.assertEqual(old_row['withdrawal_reason'], 'reassigned')
+
+    def test_revoked_target_is_flagged_and_can_be_reassigned(self):
+        created = self.create([self.bystander['id']])[1]
+        request_id = created['requests'][0]['id']
+        self.request('POST', '/api/members/' + self.bystander['id'] + '/revoke', {}, self.owner_token)
+        state = self.request('GET', '/api/state', None, self.owner_token)[1]
+        row = [r for r in state['reply_requests'] if r['id'] == request_id][0]
+        self.assertTrue(row.get('target_revoked'))
+        status, new = self.request('POST', '/api/reply-requests/' + request_id + '/reassign',
+                                   {'member_id': self.reader['id']}, self.owner_token)
+        self.assertEqual(status, 200, new)
+        self.assertEqual(new['reassigned_from'], request_id)
+
+    def test_reassign_rejects_self_and_non_pending(self):
+        created = self.create([self.reader['id']])[1]
+        old = created['requests'][0]['id']
+        self.assertEqual(self.request('POST', '/api/reply-requests/' + old + '/reassign',
+                                      {'member_id': self.owner_id}, self.owner_token)[0], 422)
+        self.request('POST', '/api/messages', {
+            'topic_id': self.topic, 'body': '回应', 'reply_to': self.message['id']}, self.reader['token'])
+        self.assertEqual(self.request('POST', '/api/reply-requests/' + old + '/reassign',
+                                      {'member_id': self.bystander['id']}, self.owner_token)[0], 409)
+
 
 if __name__ == '__main__':
     unittest.main()

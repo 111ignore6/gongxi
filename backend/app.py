@@ -122,6 +122,10 @@ class ReplyRequestPatch(Input):
     due_at: str | None = None
 
 
+class ReplyRequestReassign(Input):
+    member_id: str = Field(min_length=1, max_length=80)
+
+
 def create_app(data_dir=None):
     location = Path(data_dir or os.environ.get("CS_DATA_DIR", ROOT / "data")).expanduser().resolve()
     dbfile = location / "gongxi.sqlite3"
@@ -321,7 +325,7 @@ def create_app(data_dir=None):
             message["event_id"] = event_ids.get(message["id"])
         return messages
 
-    def serialize_reply_rows(rows, actor):
+    def serialize_reply_rows(db, rows, actor):
         out = []
         for item in rows:
             is_owner = actor["role"] == "owner"
@@ -331,6 +335,10 @@ def create_app(data_dir=None):
                 continue
             if not is_owner and not is_target:
                 item.pop("responded_at", None)
+            if item["status"] == "pending":
+                revoked = db.execute("SELECT json_extract(data,'$.revoked_at') FROM members WHERE id=?", (item["member_id"],)).fetchone()
+                if revoked and revoked[0]:
+                    item["target_revoked"] = True
             if item["status"] != "withdrawn":
                 item.pop("withdrawn_at", None)
                 item.pop("withdrawal_reason", None)
@@ -345,7 +353,7 @@ def create_app(data_dir=None):
             "SELECT id,message_id,member_id,requested_by,due_at,status,response_message_id,"
             "responded_at,withdrawn_at,withdrawal_reason,reassigned_from,created_at "
             "FROM reply_requests ORDER BY created_at,id")]
-        return serialize_reply_rows(rows, actor)
+        return serialize_reply_rows(db, rows, actor)
 
     def state(db, actor, include_messages=True):
         result = {"workspace": workspace(db), "members": [json.loads(r[0]) for r in db.execute("SELECT data FROM members ORDER BY rowid")]}
@@ -630,7 +638,7 @@ def create_app(data_dir=None):
                 return {"requests": []}
             placeholders = ",".join("?" for _ in ids)
             rows = [dict(r) for r in db.execute("SELECT * FROM reply_requests WHERE id IN (" + placeholders + ")", ids)]
-            return {"requests": serialize_reply_rows(rows, actor)}
+            return {"requests": serialize_reply_rows(db, rows, actor)}
         targets = list(dict.fromkeys(body.member_ids))
         if actor["id"] in targets:
             fail(422, "不能请求自己回应")
@@ -663,7 +671,7 @@ def create_app(data_dir=None):
         db.execute("INSERT INTO reply_request_idempotency(requested_by,message_id,key,payload,result_ids) VALUES(?,?,?,?,?)", (actor["id"], body.message_id, key, payload, json.dumps(ids)))
         placeholders = ",".join("?" for _ in ids)
         rows = [dict(r) for r in db.execute("SELECT * FROM reply_requests WHERE id IN (" + placeholders + ")", ids)]
-        return {"requests": serialize_reply_rows(rows, actor)}
+        return {"requests": serialize_reply_rows(db, rows, actor)}
 
     @app.patch("/api/reply-requests/{ident}")
     def patch_reply_request(ident: str, body: ReplyRequestPatch,
@@ -694,6 +702,39 @@ def create_app(data_dir=None):
                 due = parsed.astimezone(timezone.utc).isoformat()
             db.execute("UPDATE reply_requests SET due_at=? WHERE id=?", (due, ident))
         return dict(db.execute("SELECT * FROM reply_requests WHERE id=?", (ident,)).fetchone())
+
+    @app.post("/api/reply-requests/{ident}/reassign")
+    def reassign_reply_request(ident: str, body: ReplyRequestReassign,
+                               actor=Depends(member, scope="function"), db=Depends(database, scope="function")):
+        row = db.execute("SELECT * FROM reply_requests WHERE id=?", (ident,)).fetchone()
+        if not row:
+            fail(404, "回应请求不存在")
+        item = dict(row)
+        if item["status"] != "pending":
+            fail(409, "只有待回应的请求可以重指派")
+        if actor["id"] != item["requested_by"] and actor["role"] != "owner":
+            fail(403, "只有发起人或组织者可以重指派")
+        if body.member_id == item["requested_by"]:
+            fail(422, "不能把回应请求指派给发起人自己")
+        member_row = db.execute("SELECT data FROM members WHERE id=?", (body.member_id,)).fetchone()
+        if not member_row:
+            fail(422, "重指派对象必须是有效成员")
+        if json.loads(member_row["data"])["revoked_at"]:
+            fail(422, "重指派对象不能是已撤销成员")
+        duplicate = db.execute("SELECT id FROM reply_requests WHERE message_id=? AND member_id=? AND status='pending'",
+                               (item["message_id"], body.member_id)).fetchone()
+        if duplicate:
+            fail(409, "该成员已有未结束的回应请求")
+        timestamp = now()
+        db.execute("UPDATE reply_requests SET status='withdrawn',withdrawn_at=?,withdrawal_reason='reassigned' WHERE id=?",
+                   (timestamp, ident))
+        event(db, "reply_request.withdrawn", ident, actor["id"])
+        new_id = uid()
+        db.execute("INSERT INTO reply_requests(id,message_id,member_id,requested_by,due_at,status,reassigned_from,created_at) "
+                   "VALUES(?,?,?,?,?,'pending',?,?)",
+                   (new_id, item["message_id"], body.member_id, item["requested_by"], item["due_at"], ident, timestamp))
+        event(db, "reply_request.created", new_id, actor["id"])
+        return dict(db.execute("SELECT * FROM reply_requests WHERE id=?", (new_id,)).fetchone())
 
     @app.post("/api/topics")
     def topic(body: Topic, actor=Depends(member, scope="function"), db=Depends(database, scope="function")):
