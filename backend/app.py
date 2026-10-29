@@ -164,9 +164,9 @@ def create_app(data_dir=None):
                 CREATE INDEX IF NOT EXISTS reply_requests_target ON reply_requests(member_id,status);
                 CREATE INDEX IF NOT EXISTS reply_requests_message ON reply_requests(message_id);
                 CREATE TABLE IF NOT EXISTS reply_request_idempotency(
-                    requested_by TEXT NOT NULL, key TEXT NOT NULL, message_id TEXT NOT NULL,
+                    requested_by TEXT NOT NULL, message_id TEXT NOT NULL, key TEXT NOT NULL,
                     payload TEXT NOT NULL, result_ids TEXT NOT NULL,
-                    PRIMARY KEY(requested_by,key));
+                    PRIMARY KEY(requested_by,message_id,key));
             """)
             db.execute("INSERT OR IGNORE INTO app_settings(key,value) SELECT 'read_tracking_start_event_id', CAST(COALESCE(MAX(id),0) AS TEXT) FROM events")
             db.execute("INSERT OR IGNORE INTO app_settings(key,value) VALUES('read_tracking_started_at',?)", (now(),))
@@ -321,11 +321,7 @@ def create_app(data_dir=None):
             message["event_id"] = event_ids.get(message["id"])
         return messages
 
-    def visible_reply_requests(db, actor):
-        rows = [dict(r) for r in db.execute(
-            "SELECT id,message_id,member_id,requested_by,due_at,status,response_message_id,"
-            "responded_at,withdrawn_at,withdrawal_reason,reassigned_from,created_at "
-            "FROM reply_requests ORDER BY created_at,id")]
+    def serialize_reply_rows(rows, actor):
         out = []
         for item in rows:
             is_owner = actor["role"] == "owner"
@@ -343,6 +339,13 @@ def create_app(data_dir=None):
                 item.pop("withdrawn_at", None)
             out.append(item)
         return out
+
+    def visible_reply_requests(db, actor):
+        rows = [dict(r) for r in db.execute(
+            "SELECT id,message_id,member_id,requested_by,due_at,status,response_message_id,"
+            "responded_at,withdrawn_at,withdrawal_reason,reassigned_from,created_at "
+            "FROM reply_requests ORDER BY created_at,id")]
+        return serialize_reply_rows(rows, actor)
 
     def state(db, actor, include_messages=True):
         result = {"workspace": workspace(db), "members": [json.loads(r[0]) for r in db.execute("SELECT data FROM members ORDER BY rowid")]}
@@ -618,16 +621,16 @@ def create_app(data_dir=None):
         if not key:
             fail(422, "缺少 Idempotency-Key 请求头")
         payload = json.dumps({"message_id": body.message_id, "member_ids": sorted(body.member_ids), "due_at": body.due_at}, sort_keys=True, ensure_ascii=False)
-        previous = db.execute("SELECT message_id,payload,result_ids FROM reply_request_idempotency WHERE requested_by=? AND key=?", (actor["id"], key)).fetchone()
+        previous = db.execute("SELECT payload,result_ids FROM reply_request_idempotency WHERE requested_by=? AND message_id=? AND key=?", (actor["id"], body.message_id, key)).fetchone()
         if previous:
-            if previous["message_id"] != body.message_id or previous["payload"] != payload:
+            if previous["payload"] != payload:
                 fail(409, "相同幂等键对应不同内容")
             ids = json.loads(previous["result_ids"])
             if not ids:
                 return {"requests": []}
             placeholders = ",".join("?" for _ in ids)
             rows = [dict(r) for r in db.execute("SELECT * FROM reply_requests WHERE id IN (" + placeholders + ")", ids)]
-            return {"requests": rows}
+            return {"requests": serialize_reply_rows(rows, actor)}
         targets = list(dict.fromkeys(body.member_ids))
         if actor["id"] in targets:
             fail(422, "不能请求自己回应")
@@ -657,10 +660,10 @@ def create_app(data_dir=None):
             db.execute("INSERT INTO reply_requests(id,message_id,member_id,requested_by,due_at,status,created_at) VALUES(?,?,?,?,?,'pending',?)", (ident, body.message_id, target_id, actor["id"], due, timestamp))
             event(db, "reply_request.created", ident, actor["id"])
             ids.append(ident)
-        db.execute("INSERT INTO reply_request_idempotency VALUES(?,?,?,?,?)", (actor["id"], key, body.message_id, payload, json.dumps(ids)))
+        db.execute("INSERT INTO reply_request_idempotency(requested_by,message_id,key,payload,result_ids) VALUES(?,?,?,?,?)", (actor["id"], body.message_id, key, payload, json.dumps(ids)))
         placeholders = ",".join("?" for _ in ids)
         rows = [dict(r) for r in db.execute("SELECT * FROM reply_requests WHERE id IN (" + placeholders + ")", ids)]
-        return {"requests": rows}
+        return {"requests": serialize_reply_rows(rows, actor)}
 
     @app.patch("/api/reply-requests/{ident}")
     def patch_reply_request(ident: str, body: ReplyRequestPatch,
@@ -669,7 +672,7 @@ def create_app(data_dir=None):
         if not row:
             fail(404, "回应请求不存在")
         item = dict(row)
-        if actor["role"] != "owner" and item["requested_by"] != actor["id"]:
+        if item["requested_by"] != actor["id"]:
             fail(403, "只有发起人可以修改回应请求")
         if item["status"] != "pending":
             fail(409, "只有待回应的请求可以修改")

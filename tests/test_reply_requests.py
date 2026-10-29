@@ -166,6 +166,40 @@ class ReplyRequestAcceptance(unittest.TestCase):
         self.assertEqual(bystander_types, [])
         self.assertGreater(bystander_events['cursor'], 0)
 
+    def test_idempotency_key_is_scoped_per_message(self):
+        first = self.create([self.reader['id']], key='shared')
+        other = self.request('POST', '/api/messages', {
+            'topic_id': self.topic, 'body': '另一条'}, self.owner_token)[1]
+        status, created = self.create([self.bystander['id']], message_id=other['id'], key='shared')
+        self.assertEqual(status, 200, created)
+        self.assertNotEqual(first[1]['requests'][0]['id'], created['requests'][0]['id'])
+
+    def test_retry_does_not_leak_responded_at(self):
+        message = self.request('POST', '/api/messages', {
+            'topic_id': self.topic, 'body': '请主人回应'}, self.reader['token'])[1]
+        self.request('POST', '/api/reply-requests',
+                     {'message_id': message['id'], 'member_ids': [self.owner_id]},
+                     self.reader['token'], {'Idempotency-Key': 'vis'})
+        self.request('POST', '/api/messages', {
+            'topic_id': self.topic, 'body': '回应了', 'reply_to': message['id']}, self.owner_token)
+        retry = self.request('POST', '/api/reply-requests',
+                             {'message_id': message['id'], 'member_ids': [self.owner_id]},
+                             self.reader['token'], {'Idempotency-Key': 'vis'})[1]
+        row = retry['requests'][0]
+        self.assertEqual(row['status'], 'responded')
+        self.assertNotIn('responded_at', row)
+
+    def test_only_requester_can_patch_even_owner(self):
+        message = self.request('POST', '/api/messages', {
+            'topic_id': self.topic, 'body': 'reader 发起的请求'}, self.reader['token'])[1]
+        created = self.request('POST', '/api/reply-requests',
+                               {'message_id': message['id'], 'member_ids': [self.owner_id]},
+                               self.reader['token'], {'Idempotency-Key': 'own'})[1]
+        rid = created['requests'][0]['id']
+        status, _ = self.request('PATCH', '/api/reply-requests/' + rid,
+                                 {'status': 'withdrawn'}, self.owner_token)
+        self.assertEqual(status, 403)
+
 
 if __name__ == '__main__':
     unittest.main()
