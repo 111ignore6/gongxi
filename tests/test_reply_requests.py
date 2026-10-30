@@ -257,6 +257,15 @@ class ReplyRequestAcceptance(unittest.TestCase):
         self.assertEqual(self.request('POST', '/api/reply-requests/' + request_id + '/reassign',
                                       {'member_id': self.bystander['id'],
                                        'due_at': '2000-01-01T00:00:00+00:00'}, self.owner_token)[0], 422)
+        self.assertEqual(self.request('POST', '/api/reply-requests/' + request_id + '/reassign',
+                                      {'member_id': self.bystander['id'],
+                                       'due_at': ''}, self.owner_token)[0], 422)
+        self.assertEqual(self.request('POST', '/api/reply-requests/' + request_id + '/reassign',
+                                      {'member_id': self.bystander['id'],
+                                       'due_at': 'not-a-date'}, self.owner_token)[0], 422)
+        state = self.request('GET', '/api/state', None, self.owner_token)[1]
+        still = [r for r in state['reply_requests'] if r['id'] == request_id][0]
+        self.assertEqual(still['status'], 'pending')
         status, new = self.request('POST', '/api/reply-requests/' + request_id + '/reassign',
                                    {'member_id': self.bystander['id']}, self.owner_token)
         self.assertEqual(status, 200, new)
@@ -286,6 +295,18 @@ class ReplyRequestAcceptance(unittest.TestCase):
         state = self.request('GET', '/api/state', None, self.owner_token)[1]
         row = [r for r in state['reply_requests'] if r['id'] == other][0]
         self.assertEqual(row['status'], 'pending')
+
+    def test_due_change_emits_visible_event(self):
+        created = self.create([self.reader['id']])[1]
+        request_id = created['requests'][0]['id']
+        status, _ = self.request('PATCH', '/api/reply-requests/' + request_id,
+                                 {'due_at': '2999-01-01T00:00:00+00:00'}, self.owner_token)
+        self.assertEqual(status, 200)
+        target_events = self.request('GET', '/api/events?after=0', None, self.reader['token'])[1]
+        types = [e['type'] for e in target_events['events']]
+        self.assertIn('reply_request.updated', types)
+        requester_events = self.request('GET', '/api/events?after=0', None, self.owner_token)[1]
+        self.assertIn('reply_request.updated', [e['type'] for e in requester_events['events']])
 
 
 if __name__ == '__main__':

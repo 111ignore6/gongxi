@@ -116,6 +116,8 @@
 
 ### 7.6 接口草案
 
+- 显式传入空字符串的 due_at 返回 422，且旧请求保持 pending；PATCH 修改或清空期限时发 reply_request.updated 事件，供目标/发起人轮询刷新。
+
 - POST /api/reply-requests/{id}/reassign {member_id, due_at?}：仅发起人或组织者；默认清空期限，显式传的 due_at 必须为未来（过去返回 422）；旧行 withdrawn（reason=reassigned），新行 pending 且 reassigned_from=旧 id；旧行已终态时重试返回 409，客户端可从 state 中按 reassigned_from 恢复成功结果。
 
 - `POST /api/reply-requests` `{message_id, member_ids[], due_at?}` → 200（首次与幂等重试同码），逐人生成行；校验 7.3。

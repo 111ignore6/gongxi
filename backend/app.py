@@ -124,7 +124,7 @@ class ReplyRequestPatch(Input):
 
 class ReplyRequestReassign(Input):
     member_id: str = Field(min_length=1, max_length=80)
-    due_at: str | None = None
+    due_at: str | None = Field(default=None, min_length=1, max_length=40)
 
 
 def create_app(data_dir=None):
@@ -643,8 +643,9 @@ def create_app(data_dir=None):
         targets = list(dict.fromkeys(body.member_ids))
         if actor["id"] in targets:
             fail(422, "不能请求自己回应")
-        due = body.due_at
-        if due:
+        due = None
+        if "due_at" in body.model_fields_set and body.due_at is not None:
+            due = body.due_at
             try:
                 parsed = datetime.fromisoformat(due.replace("Z", "+00:00"))
             except ValueError:
@@ -702,6 +703,7 @@ def create_app(data_dir=None):
                     fail(422, "due_at 必须是未来时间")
                 due = parsed.astimezone(timezone.utc).isoformat()
             db.execute("UPDATE reply_requests SET due_at=? WHERE id=?", (due, ident))
+            event(db, "reply_request.updated", ident, actor["id"])
         return dict(db.execute("SELECT * FROM reply_requests WHERE id=?", (ident,)).fetchone())
 
     @app.post("/api/reply-requests/{ident}/reassign")
