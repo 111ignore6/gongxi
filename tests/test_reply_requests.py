@@ -1,0 +1,313 @@
+"""HTTP acceptance for explicit reply requests (reminders, v0.3 semantics)."""
+import json
+import socket
+import tempfile
+import threading
+import time
+import unittest
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+import uvicorn
+
+from backend.app import create_app
+
+
+class ReplyRequestAcceptance(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix='gongxi-reply-requests-')
+        self.addCleanup(self.temp.cleanup)
+        listener = socket.socket()
+        listener.bind(('127.0.0.1', 0))
+        listener.listen(128)
+        self.base = 'http://127.0.0.1:' + str(listener.getsockname()[1])
+        self.server = uvicorn.Server(uvicorn.Config(
+            create_app(Path(self.temp.name)), log_level='error', access_log=False))
+        self.thread = threading.Thread(target=self.server.run,
+                                       kwargs={'sockets': [listener]}, daemon=True)
+        self.thread.start()
+        deadline = time.monotonic() + 8
+        while not self.server.started and self.thread.is_alive() and time.monotonic() < deadline:
+            time.sleep(.02)
+        self.addCleanup(setattr, self.server, 'should_exit', True)
+        owner = self.request('POST', '/api/setup', {'name': 'Owner', 'workspace_name': 'Reply requests'})[1]
+        self.owner_token = owner['token']
+        self.owner_id = owner['member']['id']
+        self.topic = self.request('POST', '/api/topics', {'title': 'Main'}, self.owner_token)[1]['id']
+        self.reader = self.join('Reader')
+        self.bystander = self.join('Bystander')
+        self.message = self.request('POST', '/api/messages', {
+            'topic_id': self.topic, 'body': '请回应一下'}, self.owner_token)[1]
+
+    def join(self, name):
+        invite = self.request('POST', '/api/invites', {'kind': 'ai'}, self.owner_token)[1]
+        joined = self.request('POST', '/api/join', {'code': invite['code'], 'name': name, 'kind': 'ai'})[1]
+        return {'token': joined['token'], 'id': joined['member']['id']}
+
+    def request(self, method, path, body=None, token=None, headers=None):
+        data = json.dumps(body).encode() if body is not None else None
+        req = urllib.request.Request(self.base + path, data=data, method=method)
+        req.add_header('Content-Type', 'application/json')
+        if token:
+            req.add_header('Authorization', 'Bearer ' + token)
+        for key, value in (headers or {}).items():
+            req.add_header(key, value)
+        try:
+            with urllib.request.urlopen(req, timeout=10) as response:
+                return response.status, json.loads(response.read().decode())
+        except urllib.error.HTTPError as error:
+            payload = error.read().decode()
+            return error.code, json.loads(payload) if payload else {}
+
+    def create(self, targets, message_id=None, key='k1', due=None, token=None):
+        body = {'message_id': message_id or self.message['id'], 'member_ids': targets}
+        if due:
+            body['due_at'] = due
+        return self.request('POST', '/api/reply-requests', body,
+                            token or self.owner_token, {'Idempotency-Key': key})
+
+    def test_author_creates_request_and_targets_see_it(self):
+        status, created = self.create([self.reader['id']])
+        self.assertEqual(status, 200, created)
+        request_id = created['requests'][0]['id']
+        reader_state = self.request('GET', '/api/state', None, self.reader['token'])[1]
+        self.assertEqual([r['id'] for r in reader_state['reply_requests']], [request_id])
+        bystander_state = self.request('GET', '/api/state', None, self.bystander['token'])[1]
+        self.assertEqual(bystander_state['reply_requests'], [])
+        owner_state = self.request('GET', '/api/state', None, self.owner_token)[1]
+        self.assertEqual([r['id'] for r in owner_state['reply_requests']], [request_id])
+
+    def test_only_author_can_create(self):
+        status, _ = self.create([self.bystander['id']], token=self.reader['token'])
+        self.assertEqual(status, 403)
+
+    def test_idempotent_create_returns_same_rows(self):
+        first = self.create([self.reader['id']], key='same')
+        second = self.create([self.reader['id']], key='same')
+        self.assertEqual(first[0], 200)
+        self.assertEqual([r['id'] for r in first[1]['requests']], [r['id'] for r in second[1]['requests']])
+        changed = self.create([self.bystander['id']], key='same')
+        self.assertEqual(changed[0], 409)
+
+    def test_duplicate_pending_and_self_revoked_targets_rejected(self):
+        self.create([self.reader['id']])
+        self.assertEqual(self.create([self.reader['id']], key='k2')[0], 409)
+        self.assertEqual(self.create([self.owner_id], key='k3')[0], 422)
+        self.request('POST', '/api/members/' + self.bystander['id'] + '/revoke', {}, self.owner_token)
+        self.assertEqual(self.create([self.bystander['id']], key='k4')[0], 422)
+
+    def test_due_at_must_be_future(self):
+        self.assertEqual(self.create([self.reader['id']], due='2000-01-01T00:00:00+00:00')[0], 422)
+        status, created = self.create([self.reader['id']], key='k5', due='2999-01-01T00:00:00+00:00')
+        self.assertEqual(status, 200, created)
+        self.assertTrue(created['requests'][0]['due_at'].startswith('2999-01-01'))
+
+    def test_reply_to_marks_only_target_responded(self):
+        created = self.create([self.reader['id']])[1]
+        request_id = created['requests'][0]['id']
+        # Another member replying must not close it.
+        self.request('POST', '/api/messages', {
+            'topic_id': self.topic, 'body': '别人插话', 'reply_to': self.message['id']}, self.bystander['token'])
+        state = self.request('GET', '/api/state', None, self.owner_token)[1]
+        row = [r for r in state['reply_requests'] if r['id'] == request_id][0]
+        self.assertEqual(row['status'], 'pending')
+        reply = self.request('POST', '/api/messages', {
+            'topic_id': self.topic, 'body': '我来回应', 'reply_to': self.message['id']}, self.reader['token'])[1]
+        state = self.request('GET', '/api/state', None, self.owner_token)[1]
+        row = [r for r in state['reply_requests'] if r['id'] == request_id][0]
+        self.assertEqual(row['status'], 'responded')
+        self.assertEqual(row['response_message_id'], reply['id'])
+
+    def test_visibility_of_responded_at_and_withdrawal(self):
+        created = self.create([self.reader['id']])[1]
+        request_id = created['requests'][0]['id']
+        self.request('POST', '/api/messages', {
+            'topic_id': self.topic, 'body': '回应', 'reply_to': self.message['id']}, self.reader['token'])
+        owner_row = [r for r in self.request('GET', '/api/state', None, self.owner_token)[1]['reply_requests'] if r['id'] == request_id][0]
+        target_row = [r for r in self.request('GET', '/api/state', None, self.reader['token'])[1]['reply_requests'] if r['id'] == request_id][0]
+        self.assertIn('responded_at', owner_row)
+        self.assertIn('responded_at', target_row)
+        # A second request that gets withdrawn: requester sees reason, target does not.
+        second = self.create([self.bystander['id']], key='k9')[1]['requests'][0]
+        status, _ = self.request('PATCH', '/api/reply-requests/' + second['id'],
+                                 {'status': 'withdrawn'}, self.owner_token)
+        self.assertEqual(status, 200)
+        target_state = self.request('GET', '/api/state', None, self.bystander['token'])[1]
+        row = [r for r in target_state['reply_requests'] if r['id'] == second['id']][0]
+        self.assertEqual(row['status'], 'withdrawn')
+        self.assertNotIn('withdrawal_reason', row)
+        self.assertNotIn('withdrawn_at', row)
+
+    def test_only_requester_can_withdraw_and_only_pending(self):
+        created = self.create([self.reader['id']])[1]
+        request_id = created['requests'][0]['id']
+        self.assertEqual(self.request('PATCH', '/api/reply-requests/' + request_id,
+                                      {'status': 'withdrawn'}, self.reader['token'])[0], 403)
+        self.assertEqual(self.request('PATCH', '/api/reply-requests/' + request_id,
+                                      {'status': 'withdrawn'}, self.owner_token)[0], 200)
+        self.assertEqual(self.request('PATCH', '/api/reply-requests/' + request_id,
+                                      {'status': 'withdrawn'}, self.owner_token)[0], 409)
+
+    def test_events_are_filtered_without_stalling_cursor(self):
+        created = self.create([self.reader['id']])[1]
+        request_id = created['requests'][0]['id']
+        self.request('POST', '/api/messages', {
+            'topic_id': self.topic, 'body': '回应', 'reply_to': self.message['id']}, self.reader['token'])
+        owner_events = self.request('GET', '/api/events?after=0', None, self.owner_token)[1]
+        target_events = self.request('GET', '/api/events?after=0', None, self.reader['token'])[1]
+        bystander_events = self.request('GET', '/api/events?after=0', None, self.bystander['token'])[1]
+        owner_types = [e['type'] for e in owner_events['events'] if e['type'].startswith('reply_request.')]
+        target_types = [e['type'] for e in target_events['events'] if e['type'].startswith('reply_request.')]
+        bystander_types = [e['type'] for e in bystander_events['events'] if e['type'].startswith('reply_request.')]
+        self.assertIn('reply_request.created', owner_types)
+        self.assertIn('reply_request.responded', owner_types)
+        self.assertIn('reply_request.created', target_types)
+        self.assertEqual(bystander_types, [])
+        self.assertGreater(bystander_events['cursor'], 0)
+
+    def test_idempotency_key_is_scoped_per_message(self):
+        first = self.create([self.reader['id']], key='shared')
+        other = self.request('POST', '/api/messages', {
+            'topic_id': self.topic, 'body': '另一条'}, self.owner_token)[1]
+        status, created = self.create([self.bystander['id']], message_id=other['id'], key='shared')
+        self.assertEqual(status, 200, created)
+        self.assertNotEqual(first[1]['requests'][0]['id'], created['requests'][0]['id'])
+
+    def test_retry_does_not_leak_responded_at(self):
+        message = self.request('POST', '/api/messages', {
+            'topic_id': self.topic, 'body': '请主人回应'}, self.reader['token'])[1]
+        self.request('POST', '/api/reply-requests',
+                     {'message_id': message['id'], 'member_ids': [self.owner_id]},
+                     self.reader['token'], {'Idempotency-Key': 'vis'})
+        self.request('POST', '/api/messages', {
+            'topic_id': self.topic, 'body': '回应了', 'reply_to': message['id']}, self.owner_token)
+        retry = self.request('POST', '/api/reply-requests',
+                             {'message_id': message['id'], 'member_ids': [self.owner_id]},
+                             self.reader['token'], {'Idempotency-Key': 'vis'})[1]
+        row = retry['requests'][0]
+        self.assertEqual(row['status'], 'responded')
+        self.assertNotIn('responded_at', row)
+
+    def test_only_requester_can_patch_even_owner(self):
+        message = self.request('POST', '/api/messages', {
+            'topic_id': self.topic, 'body': 'reader 发起的请求'}, self.reader['token'])[1]
+        created = self.request('POST', '/api/reply-requests',
+                               {'message_id': message['id'], 'member_ids': [self.owner_id]},
+                               self.reader['token'], {'Idempotency-Key': 'own'})[1]
+        rid = created['requests'][0]['id']
+        status, _ = self.request('PATCH', '/api/reply-requests/' + rid,
+                                 {'status': 'withdrawn'}, self.owner_token)
+        self.assertEqual(status, 403)
+
+    def test_reassign_audits_old_row_and_creates_new(self):
+        created = self.create([self.reader['id']])[1]
+        old = created['requests'][0]['id']
+        status, new = self.request('POST', '/api/reply-requests/' + old + '/reassign',
+                                   {'member_id': self.bystander['id']}, self.owner_token)
+        self.assertEqual(status, 200, new)
+        self.assertEqual(new['status'], 'pending')
+        self.assertEqual(new['reassigned_from'], old)
+        self.assertIsNone(new['due_at'])
+        state = self.request('GET', '/api/state', None, self.owner_token)[1]
+        old_row = [r for r in state['reply_requests'] if r['id'] == old][0]
+        self.assertEqual(old_row['status'], 'withdrawn')
+        self.assertEqual(old_row['withdrawal_reason'], 'reassigned')
+
+    def test_revoked_target_is_flagged_and_can_be_reassigned(self):
+        created = self.create([self.bystander['id']])[1]
+        request_id = created['requests'][0]['id']
+        self.request('POST', '/api/members/' + self.bystander['id'] + '/revoke', {}, self.owner_token)
+        state = self.request('GET', '/api/state', None, self.owner_token)[1]
+        row = [r for r in state['reply_requests'] if r['id'] == request_id][0]
+        self.assertTrue(row.get('target_revoked'))
+        status, new = self.request('POST', '/api/reply-requests/' + request_id + '/reassign',
+                                   {'member_id': self.reader['id']}, self.owner_token)
+        self.assertEqual(status, 200, new)
+        self.assertEqual(new['reassigned_from'], request_id)
+
+    def test_reassign_rejects_self_and_non_pending(self):
+        created = self.create([self.reader['id']])[1]
+        old = created['requests'][0]['id']
+        self.assertEqual(self.request('POST', '/api/reply-requests/' + old + '/reassign',
+                                      {'member_id': self.owner_id}, self.owner_token)[0], 422)
+        self.request('POST', '/api/messages', {
+            'topic_id': self.topic, 'body': '回应', 'reply_to': self.message['id']}, self.reader['token'])
+        self.assertEqual(self.request('POST', '/api/reply-requests/' + old + '/reassign',
+                                      {'member_id': self.bystander['id']}, self.owner_token)[0], 409)
+
+    def test_requester_can_reassign_and_unrelated_cannot(self):
+        message = self.request('POST', '/api/messages', {
+            'topic_id': self.topic, 'body': 'reader 发起请求'}, self.reader['token'])[1]
+        created = self.request('POST', '/api/reply-requests',
+                               {'message_id': message['id'], 'member_ids': [self.owner_id]},
+                               self.reader['token'], {'Idempotency-Key': 'rr1'})[1]
+        request_id = created['requests'][0]['id']
+        status, _ = self.request('POST', '/api/reply-requests/' + request_id + '/reassign',
+                                 {'member_id': self.bystander['id']}, self.bystander['token'])
+        self.assertEqual(status, 403)
+        status, new = self.request('POST', '/api/reply-requests/' + request_id + '/reassign',
+                                   {'member_id': self.bystander['id']}, self.reader['token'])
+        self.assertEqual(status, 200, new)
+        self.assertEqual(new['reassigned_from'], request_id)
+
+    def test_reassign_deadline_and_retry_recovery(self):
+        created = self.create([self.reader['id']], due='2999-01-01T00:00:00+00:00')[1]
+        request_id = created['requests'][0]['id']
+        self.assertEqual(self.request('POST', '/api/reply-requests/' + request_id + '/reassign',
+                                      {'member_id': self.bystander['id'],
+                                       'due_at': '2000-01-01T00:00:00+00:00'}, self.owner_token)[0], 422)
+        self.assertEqual(self.request('POST', '/api/reply-requests/' + request_id + '/reassign',
+                                      {'member_id': self.bystander['id'],
+                                       'due_at': ''}, self.owner_token)[0], 422)
+        self.assertEqual(self.request('POST', '/api/reply-requests/' + request_id + '/reassign',
+                                      {'member_id': self.bystander['id'],
+                                       'due_at': 'not-a-date'}, self.owner_token)[0], 422)
+        state = self.request('GET', '/api/state', None, self.owner_token)[1]
+        still = [r for r in state['reply_requests'] if r['id'] == request_id][0]
+        self.assertEqual(still['status'], 'pending')
+        status, new = self.request('POST', '/api/reply-requests/' + request_id + '/reassign',
+                                   {'member_id': self.bystander['id']}, self.owner_token)
+        self.assertEqual(status, 200, new)
+        self.assertIsNone(new['due_at'])
+        retry_status, _ = self.request('POST', '/api/reply-requests/' + request_id + '/reassign',
+                                       {'member_id': self.reader['id']}, self.owner_token)
+        self.assertEqual(retry_status, 409)
+        state = self.request('GET', '/api/state', None, self.owner_token)[1]
+        recovered = [r for r in state['reply_requests'] if r.get('reassigned_from') == request_id]
+        self.assertEqual(len(recovered), 1)
+
+    def test_reassign_accepts_future_due_and_normalizes_utc(self):
+        created = self.create([self.reader['id']])[1]
+        request_id = created['requests'][0]['id']
+        status, new = self.request('POST', '/api/reply-requests/' + request_id + '/reassign',
+                                   {'member_id': self.bystander['id'],
+                                    'due_at': '2999-01-01T08:00:00+08:00'}, self.owner_token)
+        self.assertEqual(status, 200, new)
+        self.assertTrue(new['due_at'].startswith('2999-01-01T00:00:00'))
+        # 无时区与非法格式都拒绝，且旧行保持 pending（不产生半完成状态）。
+        second_message = self.request('POST', '/api/messages', {
+            'topic_id': self.topic, 'body': '第二条原消息'}, self.owner_token)[1]
+        other = self.create([self.reader['id']], message_id=second_message['id'], key='tz')[1]['requests'][0]['id']
+        self.assertEqual(self.request('POST', '/api/reply-requests/' + other + '/reassign',
+                                      {'member_id': self.bystander['id'],
+                                       'due_at': '2999-01-01T00:00:00'}, self.owner_token)[0], 422)
+        state = self.request('GET', '/api/state', None, self.owner_token)[1]
+        row = [r for r in state['reply_requests'] if r['id'] == other][0]
+        self.assertEqual(row['status'], 'pending')
+
+    def test_due_change_emits_visible_event(self):
+        created = self.create([self.reader['id']])[1]
+        request_id = created['requests'][0]['id']
+        status, _ = self.request('PATCH', '/api/reply-requests/' + request_id,
+                                 {'due_at': '2999-01-01T00:00:00+00:00'}, self.owner_token)
+        self.assertEqual(status, 200)
+        target_events = self.request('GET', '/api/events?after=0', None, self.reader['token'])[1]
+        types = [e['type'] for e in target_events['events']]
+        self.assertIn('reply_request.updated', types)
+        requester_events = self.request('GET', '/api/events?after=0', None, self.owner_token)[1]
+        self.assertIn('reply_request.updated', [e['type'] for e in requester_events['events']])
+
+
+if __name__ == '__main__':
+    unittest.main()
