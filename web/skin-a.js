@@ -1,8 +1,12 @@
 // Skin A: keep the active topic tab visible on narrow screens (UI only).
+// Re-binds whenever the authenticated shell is replaced (logout -> login).
 (() => {
   const strip = () => document.querySelector('.topicstrip');
-  function ensureActiveVisible() {
-    const s = strip();
+  let observed = null;
+  let observer = null;
+
+  function ensureActiveVisible(el) {
+    const s = el || strip();
     if (!s || s.scrollWidth <= s.clientWidth) return;
     const on = s.querySelector('button.on, a.on');
     if (!on) return;
@@ -12,20 +16,30 @@
       on.scrollIntoView({ inline: 'center', block: 'nearest' });
     }
   }
-  function bind() {
-    const s = strip();
-    if (!s) return false;
-    const mo = new MutationObserver(() => requestAnimationFrame(ensureActiveVisible));
-    mo.observe(s, { childList: true, subtree: true, attributes: true });
-    window.addEventListener('resize', () => requestAnimationFrame(ensureActiveVisible));
-    ensureActiveVisible();
-    return true;
+
+  function attach(s) {
+    if (observed === s) return;
+    detach();
+    observer = new MutationObserver(() => requestAnimationFrame(() => ensureActiveVisible(s)));
+    observer.observe(s, { childList: true, subtree: true, attributes: true });
+    observed = s;
+    ensureActiveVisible(s);
   }
-  if (bind()) return;
-  // Observe until the authenticated shell mounts; disconnect as soon as we bind.
-  // No timer: on the login page this only reacts to DOM mutations, it does not poll.
-  const wait = new MutationObserver(() => {
-    if (bind()) wait.disconnect();
+
+  function detach() {
+    if (observer) observer.disconnect();
+    observer = null;
+    observed = null;
+  }
+
+  // Watch the document for the shell appearing, being replaced, or going away.
+  const shellWatch = new MutationObserver(() => {
+    const s = strip();
+    if (s) attach(s); else detach();
   });
-  wait.observe(document.documentElement, { childList: true, subtree: true });
+  shellWatch.observe(document.documentElement, { childList: true, subtree: true });
+
+  window.addEventListener('resize', () => ensureActiveVisible());
+  const first = strip();
+  if (first) attach(first);
 })();
